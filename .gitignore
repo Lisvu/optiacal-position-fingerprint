@@ -1,0 +1,16 @@
+# 忽略数据集文件夹（核心）
+data/
+
+# Python 项目通用忽略项
+__pycache__/
+*.py[cod]
+.venv/  # 你的虚拟环境文件夹
+venv/
+env/
+.DS_Store
+Thumbs.db
+*.log
+
+# 保留 data 下的说明文档（可选）
+!data/README.md
+!data/demo_dataset.csv
