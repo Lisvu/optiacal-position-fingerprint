@@ -297,26 +297,78 @@ def print_block_result(block_idx: int, result: dict) -> None:
 # 从CSV文件读取数据（修改部分）
 # =========================
 
-def load_data_from_csv(file_path1: str, file_path2: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def generate_probes(num_probes: int, max_row_index: int) -> np.ndarray:
     """
-    从两个CSV文件读取数据，提取指定行作为Y1和Y2矩阵
+    根据探针数量生成固定间隔的探针数组
+
+    Parameters
+    ----------
+    num_probes : 探针数量
+    max_row_index : 最大行索引（CSV文件行数-1）
+
+    Returns
+    -------
+    probes : 固定间隔的探针数组，从5开始，间隔为360/(num_probes-1)的最近5的倍数
+    """
+    if num_probes < 2:
+        raise ValueError("探针数量至少为2")
+    
+    # 计算理论间隔
+    theoretical_interval = 360 / (num_probes - 1)
+    
+    # 找到最近的5的倍数
+    interval = round(theoretical_interval / 5) * 5
+    
+    # 生成探针数组，从5开始，间隔为计算得到的interval
+    probes = []
+    for i in range(num_probes):
+        probe = 5 + i * interval
+        # 确保探针值对应的行索引不超过max_row_index
+        max_probe = (max_row_index + 1) * 5
+        if probe > max_probe:
+            probe = max_probe
+        probes.append(probe)
+    
+    print(f"\n========== 探针生成 ==========")
+    print(f"探针数量: {num_probes}")
+    print(f"理论间隔: {theoretical_interval:.4f}")
+    print(f"实际间隔: {interval}")
+    print(f"最大行索引: {max_row_index}")
+    print(f"最大允许探针值: {(max_row_index + 1) * 5}")
+    print(f"生成的探针: {probes}")
+    
+    return np.array(probes, dtype=float)
+
+
+def load_data_from_csv(file_path1: str, file_path2: str, num_probes: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    从两个CSV文件读取数据，根据探针数量提取对应行作为Y1和Y2矩阵
 
     Parameters
     ----------
     file_path1 : 第一个CSV文件路径（对应位置1）
     file_path2 : 第二个CSV文件路径（对应位置2）
+    num_probes : 探针数量
 
     Returns
     -------
     probes : 探针数组
-    Y1 : 位置1的实测矩阵（第2、11、21、31、41、51、61行）
-    Y2 : 位置2的实测矩阵（第2、11、21、31、41、51、61行）
+    Y1 : 位置1的实测矩阵
+    Y2 : 位置2的实测矩阵
     """
-    # 定义要提取的行索引（第2、11、21、31、41、51、61行，Python索引从0开始，所以减1）
-    target_row_indices = [0, 9, 19, 29, 39, 49, 59]
-
-    # 读取第一个CSV文件（位置1）
+    # 读取第一个CSV文件（位置1）获取行数
     df1 = pd.read_csv(file_path1)
+    max_row_index = len(df1) - 1
+    
+    # 生成探针数组
+    probes = generate_probes(num_probes, max_row_index)
+    
+    # 计算要提取的行索引：(probe/5)-1
+    target_row_indices = []
+    for probe in probes:
+        row_index = int((probe / 5) - 1)
+        target_row_indices.append(row_index)
+
     # 提取指定行的数据，转换为numpy数组
     Y1 = df1.iloc[target_row_indices].values.astype(float)
 
@@ -325,17 +377,16 @@ def load_data_from_csv(file_path1: str, file_path2: str) -> Tuple[np.ndarray, np
     # 提取指定行的数据，转换为numpy数组
     Y2 = df2.iloc[target_row_indices].values.astype(float)
 
-    # 探针数组（保持与原代码一致）
-    probes = np.array([5, 50, 100, 150, 200, 250, 300], dtype=float)
-
     print(f"成功从CSV文件读取数据：")
+    print(f"探针数组：{probes}")
+    print(f"提取的行索引：{target_row_indices}")
     print(f"第一个文件 {file_path1} 提取行数：{len(Y1)}，列数：{Y1.shape[1]}")
     print(f"第二个文件 {file_path2} 提取行数：{len(Y2)}，列数：{Y2.shape[1]}")
 
     return probes, Y1, Y2
 
 
-def get_data_from_csv(csv_file1: str, csv_file2: str) -> Tuple[List[FingerprintModel], List[Array], Dict[int, int]]:
+def get_data_from_csv(csv_file1: str, csv_file2: str, num_probes: int) -> Tuple[List[FingerprintModel], List[Array], Dict[int, int]]:
     """
     从CSV文件获取数据并创建FingerprintModel，替代原有的builtin_example
 
@@ -343,6 +394,7 @@ def get_data_from_csv(csv_file1: str, csv_file2: str) -> Tuple[List[FingerprintM
     ----------
     csv_file1 : 第一个CSV文件路径
     csv_file2 : 第二个CSV文件路径
+    num_probes : 探针数量
 
     Returns
     -------
@@ -351,40 +403,104 @@ def get_data_from_csv(csv_file1: str, csv_file2: str) -> Tuple[List[FingerprintM
     hue_mapping : 颜色映射字典
     """
     # 直接从CSV文件加载数据
-    probes, Y1, Y2 = load_data_from_csv(csv_file1, csv_file2)
+    probes, Y1, Y2 = load_data_from_csv(csv_file1, csv_file2, num_probes)
 
     # 提取两个位置的指纹模型
     m1 = extract_fingerprint(probes, Y1)
     m2 = extract_fingerprint(probes, Y2)
 
-    # 为了与原文档中已固定的地址码方向保持一致，必要时翻转位置1方向
-    target_c1 = np.array([1, 1, 1, -1, -1, -1, 1], dtype=int)
-    if not np.array_equal(m1.code, target_c1):
-        m1 = FingerprintModel(
-            probes=m1.probes,
-            Y=m1.Y,
-            trend=m1.trend,
-            residual=m1.residual,
-            w=-m1.w,
-            z=-m1.z,
-            code=-m1.code,
-        )
+    # 注意：由于探针数量是用户指定的，不再强制调整地址码方向
+    # 保持原始提取的地址码方向
 
-    # 保持hue_mapping与原代码一致
-    hue_mapping = {-2: 200, 0: 5, 2: 100}
+    # 生成hue_mapping，根据两个位置的z值特征选择合适的探针值
+    # -2: 两个位置的z值都是负值且绝对值更大的位置
+    # 0: 两个位置的z值有正有负，绝对值接近于0的位置
+    # 2: 两个位置的z值都大于0且绝对值更大的位置
+    
+    # 获取两个位置的z值
+    z1 = m1.z
+    z2 = m2.z
+    
+    # 计算每个位置的特征
+    features = []
+    for i in range(len(z1)):
+        z1_val = z1[i]
+        z2_val = z2[i]
+        
+        # 计算特征：
+        # 1. 两个值是否都为负
+        both_negative = z1_val < 0 and z2_val < 0
+        # 2. 两个值是否都为正
+        both_positive = z1_val > 0 and z2_val > 0
+        # 3. 两个值是否有正有负
+        mixed_sign = not (both_negative or both_positive)
+        # 4. 绝对值之和（用于比较大小）
+        abs_sum = abs(z1_val) + abs(z2_val)
+        # 5. 绝对值之和的倒数（用于比较接近0的程度）
+        near_zero_score = 1 / (abs_sum + 1e-10)  # 避免除零
+        
+        features.append({
+            'index': i,
+            'both_negative': both_negative,
+            'both_positive': both_positive,
+            'mixed_sign': mixed_sign,
+            'abs_sum': abs_sum,
+            'near_zero_score': near_zero_score
+        })
+    
+    # 选择-2的映射：两个值都为负且绝对值之和最大的位置
+    negative_candidates = [f for f in features if f['both_negative']]
+    if negative_candidates:
+        negative_candidates.sort(key=lambda x: x['abs_sum'], reverse=True)
+        neg_index = negative_candidates[0]['index']
+    else:
+        # 如果没有符合条件的，选择第一个位置
+        neg_index = 0
+    
+    # 选择2的映射：两个值都为正且绝对值之和最大的位置
+    positive_candidates = [f for f in features if f['both_positive']]
+    if positive_candidates:
+        positive_candidates.sort(key=lambda x: x['abs_sum'], reverse=True)
+        pos_index = positive_candidates[0]['index']
+    else:
+        # 如果没有符合条件的，选择最后一个位置
+        pos_index = len(probes) - 1
+    
+    # 选择0的映射：两个值有正有负且绝对值之和最小的位置
+    mixed_candidates = [f for f in features if f['mixed_sign']]
+    if mixed_candidates:
+        mixed_candidates.sort(key=lambda x: x['abs_sum'])
+        zero_index = mixed_candidates[0]['index']
+    else:
+        # 如果没有符合条件的，选择中间位置
+        zero_index = len(probes) // 2
+    
+    # 生成hue_mapping
+    hue_mapping = {
+        -2: int(probes[neg_index]),
+        0: int(probes[zero_index]),
+        2: int(probes[pos_index])
+    }
+    
+    # 打印hue_mapping的选择结果
+    print("\n========== Hue Mapping 选择 ==========")
+    print(f"-2 映射到位置 {neg_index}，探针值: {probes[neg_index]}，z1: {z1[neg_index]:.2f}, z2: {z2[neg_index]:.2f}")
+    print(f"0  映射到位置 {zero_index}，探针值: {probes[zero_index]}，z1: {z1[zero_index]:.2f}, z2: {z2[zero_index]:.2f}")
+    print(f"2  映射到位置 {pos_index}，探针值: {probes[pos_index]}，z1: {z1[pos_index]:.2f}, z2: {z2[pos_index]:.2f}")
+    print(f"hue_mapping: {hue_mapping}")
 
     return [m1, m2], [Y1, Y2], hue_mapping
 
 
-# =========================
-# 主函数（修改为使用CSV数据）
-# =========================
-
 def main() -> None:
-    csv_file1 = "15pro/white/9.csv"
-    csv_file2 = "15pro/white/18.csv"
+    csv_file1 = "data\\15pro\\yellow\\12.csv"
+    csv_file2 = "data\\15pro\\yellow\\14.csv"
+    
+    # 指定探针数量
+    num_probes = 15
+    
     # 从CSV文件获取数据（替代原有的get_builtin_example()）
-    models, _, hue_mapping = get_data_from_csv(csv_file1, csv_file2)
+    models, _, hue_mapping = get_data_from_csv(csv_file1, csv_file2, num_probes)
 
     print_model_summary("position 1", models[0])
     print_model_summary("position 2", models[1])
@@ -395,6 +511,9 @@ def main() -> None:
     bit_blocks_pm = [
         np.array([+1, -1]),
         np.array([-1, -1]),
+        np.array([-1, +1]),
+        np.array([-1, -1]),
+        np.array([-1, +1]),
         np.array([-1, +1]),
     ]
 
