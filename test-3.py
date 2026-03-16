@@ -596,9 +596,9 @@ def get_data_from_csv(csv_file1: str, csv_file2: str, csv_file3: str, num_probes
 
 
 def main() -> None:
-    csv_file1 = "data\\15pro\\high\\9.csv"
-    csv_file2 = "data\\15pro\\high\\16.csv"
-    csv_file3 = "data\\15pro\\high\\23.csv"  # 新增第三个位置的CSV文件
+    csv_file1 = "data\\mate40pro\\白\\1.csv"
+    csv_file2 = "data\\mate40pro\\白\\3.csv"
+    csv_file3 = "data\\mate40pro\\白\\5.csv"  # 新增第三个位置的CSV文件
     
     # 寻找最优探针数量
     best_probe_count = find_optimal_probe_count(csv_file1, csv_file2, csv_file3, min_probes=5, max_probes=20)
