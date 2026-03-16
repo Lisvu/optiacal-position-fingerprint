@@ -133,6 +133,92 @@ def bin_to_pm1(bits_bin: List[int]) -> Array:
     return np.where(bits_bin > 0, 1, -1)
 
 
+def calculate_correlation(c1: Array, c2: Array) -> float:
+    """
+    计算两个地址码之间的互相关指数
+    
+    Parameters
+    ----------
+    c1 : 第一个地址码数组
+    c2 : 第二个地址码数组
+    
+    Returns
+    -------
+    float : 互相关指数
+    """
+    # 确保两个数组长度相同
+    assert len(c1) == len(c2), "地址码长度必须相同"
+    
+    # 计算协方差
+    covariance = np.cov(c1, c2)[0, 1]
+    
+    # 计算标准差
+    std1 = np.std(c1)
+    std2 = np.std(c2)
+    
+    # 避免除零错误
+    if std1 == 0 or std2 == 0:
+        return 0.0
+    
+    # 计算互相关指数
+    correlation = covariance / (std1 * std2)
+    return correlation
+
+
+def find_optimal_probe_count(csv_file1: str, csv_file2: str, csv_file3: str, min_probes: int = 5, max_probes: int = 15) -> int:
+    """
+    遍历探针数量，找到地址码最大互相关指数最小的探针数量
+    
+    Parameters
+    ----------
+    csv_file1 : 第一个CSV文件路径
+    csv_file2 : 第二个CSV文件路径
+    csv_file3 : 第三个CSV文件路径
+    min_probes : 最小探针数量
+    max_probes : 最大探针数量
+    
+    Returns
+    -------
+    int : 最优探针数量
+    """
+    best_probe_count = min_probes
+    min_max_correlation = float('inf')
+    
+    print("\n========== 寻找最优探针数量 ==========")
+    
+    for num_probes in range(min_probes, max_probes + 1):
+        # 加载数据
+        probes, Y1, Y2, Y3 = load_data_from_csv(csv_file1, csv_file2, csv_file3, num_probes)
+        
+        # 提取指纹模型
+        m1 = extract_fingerprint(probes, Y1)
+        m2 = extract_fingerprint(probes, Y2)
+        m3 = extract_fingerprint(probes, Y3)
+        
+        # 获取地址码
+        c1 = m1.code
+        c2 = m2.code
+        c3 = m3.code
+        
+        # 计算互相关指数
+        rho12 = abs(calculate_correlation(c1, c2))
+        rho13 = abs(calculate_correlation(c1, c3))
+        rho23 = abs(calculate_correlation(c2, c3))
+        
+        # 计算最大互相关指数
+        max_correlation = max(rho12, rho13, rho23)
+        
+        print(f"探针数量: {num_probes}, ρ12: {rho12:.4f}, ρ13: {rho13:.4f}, ρ23: {rho23:.4f}, ρmax: {max_correlation:.4f}")
+        
+        # 更新最优值
+        if max_correlation < min_max_correlation:
+            min_max_correlation = max_correlation
+            best_probe_count = num_probes
+    
+    print(f"\n最优探针数量: {best_probe_count}, 最小ρmax: {min_max_correlation:.4f}")
+    return best_probe_count
+
+
 # =========================
 # Encoding / observation
 # =========================
@@ -510,12 +596,17 @@ def get_data_from_csv(csv_file1: str, csv_file2: str, csv_file3: str, num_probes
 
 
 def main() -> None:
-    csv_file1 = "data\\15pro\\yellow\\2.csv"
-    csv_file2 = "data\\15pro\\yellow\\14.csv"
-    csv_file3 = "data\\15pro\\yellow\\23.csv"  # 新增第三个位置的CSV文件
+    csv_file1 = "data\\15pro\\high\\9.csv"
+    csv_file2 = "data\\15pro\\high\\16.csv"
+    csv_file3 = "data\\15pro\\high\\23.csv"  # 新增第三个位置的CSV文件
     
-    # 指定探针数量
-    num_probes = 15
+    # 寻找最优探针数量
+    best_probe_count = find_optimal_probe_count(csv_file1, csv_file2, csv_file3, min_probes=5, max_probes=20)
+    
+    # 使用最优探针数量进行实验
+    num_probes = best_probe_count
+    
+    print(f"\n========== 使用最优探针数量 {num_probes} 进行实验 ==========")
     
     # 从CSV文件获取数据（替代原有的get_builtin_example()）
     models, _, hue_mapping = get_data_from_csv(csv_file1, csv_file2, csv_file3, num_probes)
@@ -528,9 +619,12 @@ def main() -> None:
     # position1 sends 101, position2 sends 011, position3 sends 110
     # blocks: (+1,-1,+1), (-1,-1,-1), (+1,+1,-1)
     bit_blocks_pm = [
-        np.array([+1, -1, +1]),  # 三个设备的发送值
+        np.array([-1, -1, +1]),  # 三个设备的发送值
         np.array([-1, -1, -1]),
         np.array([-1, +1, +1]),
+        np.array([-1, +1, +1]),
+        np.array([+1, +1, -1]),
+        np.array([+1, +1, +1]),
     ]
 
     results = simulate_blocks(models, bit_blocks_pm, hue_mapping)
