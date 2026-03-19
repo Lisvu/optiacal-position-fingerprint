@@ -149,23 +149,15 @@ def calculate_correlation(c1: Array, c2: Array) -> float:
     # 确保两个数组长度相同
     assert len(c1) == len(c2), "地址码长度必须相同"
     
-    # 计算协方差
-    covariance = np.cov(c1, c2)[0, 1]
+    # 使用numpy的corrcoef函数计算相关系数
+    # corrcoef返回一个2x2矩阵，[0,1]和[1,0]位置是两个数组的相关系数
+    correlation_matrix = np.corrcoef(c1, c2)
+    correlation = correlation_matrix[0, 1]
     
-    # 计算标准差
-    std1 = np.std(c1)
-    std2 = np.std(c2)
-    
-    # 避免除零错误
-    if std1 == 0 or std2 == 0:
-        return 0.0
-    
-    # 计算互相关指数
-    correlation = covariance / (std1 * std2)
     return correlation
 
 
-def find_optimal_probe_count(csv_file1: str, csv_file2: str, csv_file3: str, min_probes: int = 5, max_probes: int = 15) -> int:
+def find_optimal_probe_count(csv_file1: str, csv_file2: str, csv_file3: str, csv_file4: str, min_probes: int = 5, max_probes: int = 15) -> int:
     """
     遍历探针数量，找到地址码最大互相关指数最小的探针数量
     
@@ -174,6 +166,7 @@ def find_optimal_probe_count(csv_file1: str, csv_file2: str, csv_file3: str, min
     csv_file1 : 第一个CSV文件路径
     csv_file2 : 第二个CSV文件路径
     csv_file3 : 第三个CSV文件路径
+    csv_file4 : 第四个CSV文件路径
     min_probes : 最小探针数量
     max_probes : 最大探针数量
     
@@ -188,27 +181,32 @@ def find_optimal_probe_count(csv_file1: str, csv_file2: str, csv_file3: str, min
     
     for num_probes in range(min_probes, max_probes + 1):
         # 加载数据
-        probes, Y1, Y2, Y3 = load_data_from_csv(csv_file1, csv_file2, csv_file3, num_probes)
+        probes, Y1, Y2, Y3, Y4 = load_data_from_csv(csv_file1, csv_file2, csv_file3, csv_file4, num_probes)
         
         # 提取指纹模型
         m1 = extract_fingerprint(probes, Y1)
         m2 = extract_fingerprint(probes, Y2)
         m3 = extract_fingerprint(probes, Y3)
+        m4 = extract_fingerprint(probes, Y4)
         
         # 获取地址码
         c1 = m1.code
         c2 = m2.code
         c3 = m3.code
+        c4 = m4.code
         
         # 计算互相关指数
         rho12 = abs(calculate_correlation(c1, c2))
         rho13 = abs(calculate_correlation(c1, c3))
+        rho14 = abs(calculate_correlation(c1, c4))
         rho23 = abs(calculate_correlation(c2, c3))
+        rho24 = abs(calculate_correlation(c2, c4))
+        rho34 = abs(calculate_correlation(c3, c4))
         
         # 计算最大互相关指数
-        max_correlation = max(rho12, rho13, rho23)
+        max_correlation = max(rho12, rho13, rho14, rho23, rho24, rho34)
         
-        print(f"探针数量: {num_probes}, ρ12: {rho12:.4f}, ρ13: {rho13:.4f}, ρ23: {rho23:.4f}, ρmax: {max_correlation:.4f}")
+        print(f"探针数量: {num_probes}, ρ12: {rho12:.4f}, ρ13: {rho13:.4f}, ρ14: {rho14:.4f}, ρ23: {rho23:.4f}, ρ24: {rho24:.4f}, ρ34: {rho34:.4f}, ρmax: {max_correlation:.4f}")
         
         # 更新最优值
         if max_correlation < min_max_correlation:
@@ -316,6 +314,7 @@ def simulate_blocks(
         models: List[FingerprintModel],
         bit_blocks_pm: List[Array],
         hue_mapping: Dict[int, int],
+        auto_adjust_direction: bool = True,
 ) -> List[dict]:
     """
     针对多个发送块做端到端仿真。
@@ -325,6 +324,7 @@ def simulate_blocks(
     models : 每个位置一个 FingerprintModel
     bit_blocks_pm : list of shape-(N_pos,) arrays, each entry in {+1, -1}
     hue_mapping : e.g. {-2:150, 0:100, 2:300}
+    auto_adjust_direction : 是否自动调整方向
 
     Returns
     -------
@@ -334,12 +334,18 @@ def simulate_blocks(
       - symbol_seq
       - hue_seq
       - per_pos decode result
+      - direction_adjusted : 是否调整了方向
     """
     codes = [m.code for m in models]
     probe_to_row = build_probe_to_row(models[0].probes)
     results = []
+    
+    # 用于存储每个位置的方向调整状态
+    direction_adjusted = [False] * len(models)
+    # 用于存储每个位置的方向调整标志
+    direction_flip = [1] * len(models)  # 1表示正常，-1表示需要反转
 
-    for bits_pm in bit_blocks_pm:
+    for block_idx, bits_pm in enumerate(bit_blocks_pm):
         bits_pm = np.asarray(bits_pm, dtype=int)
         symbol_seq, symbol_combinations = build_symbol_sequence(bits_pm, codes)
         hue_seq = map_symbol_to_hue(symbol_seq, symbol_combinations, hue_mapping)
@@ -350,14 +356,42 @@ def simulate_blocks(
             "symbol_seq": symbol_seq,
             "hue_seq": hue_seq,
             "per_position": [],
+            "direction_adjusted": False,
         }
 
         for pos_idx, model in enumerate(models):
             Y_obs = observe_block_from_measured_matrix(hue_seq, model.Y, probe_to_row)
+            
+            # 解码
             dec = decode_local_block(Y_obs, model.w, model.code)
+            
+            # 自动调整方向
+            if auto_adjust_direction:
+                reference_bit = pm1_to_bin(bits_pm)[pos_idx]
+                
+                # 对于第一个block，确定方向调整标志
+                if block_idx == 0:
+                    if dec.bit_hat_bin != reference_bit:
+                        direction_flip[pos_idx] = -1
+                        direction_adjusted[pos_idx] = True
+                        block_info["direction_adjusted"] = True
+                
+                # 应用方向调整
+                if direction_flip[pos_idx] == -1:
+                    dec.bit_hat_pm = -dec.bit_hat_pm
+                    dec.bit_hat_bin = 1 - dec.bit_hat_bin
+            
             block_info["per_position"].append(dec)
 
         results.append(block_info)
+    
+    # 打印方向调整结果
+    if auto_adjust_direction:
+        print("\n========== 方向调整结果 ==========")
+        for i, adjusted in enumerate(direction_adjusted):
+            if adjusted:
+                print(f"位置 {i+1} 的地址码方向已调整")
+    
     return results
 
 
@@ -445,15 +479,16 @@ def generate_probes(num_probes: int, max_row_index: int) -> np.ndarray:
     return np.array(probes, dtype=float)
 
 
-def load_data_from_csv(file_path1: str, file_path2: str, file_path3: str, num_probes: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def load_data_from_csv(file_path1: str, file_path2: str, file_path3: str, file_path4: str, num_probes: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    从三个CSV文件读取数据，根据探针数量提取对应行作为Y1、Y2和Y3矩阵
+    从四个CSV文件读取数据，根据探针数量提取对应行作为Y1、Y2、Y3和Y4矩阵
 
     Parameters
     ----------
     file_path1 : 第一个CSV文件路径（对应位置1）
     file_path2 : 第二个CSV文件路径（对应位置2）
     file_path3 : 第三个CSV文件路径（对应位置3）
+    file_path4 : 第四个CSV文件路径（对应位置4）
     num_probes : 探针数量
 
     Returns
@@ -462,6 +497,7 @@ def load_data_from_csv(file_path1: str, file_path2: str, file_path3: str, num_pr
     Y1 : 位置1的实测矩阵
     Y2 : 位置2的实测矩阵
     Y3 : 位置3的实测矩阵
+    Y4 : 位置4的实测矩阵
     """
     # 读取第一个CSV文件（位置1）获取行数
     df1 = pd.read_csv(file_path1)
@@ -489,17 +525,23 @@ def load_data_from_csv(file_path1: str, file_path2: str, file_path3: str, num_pr
     # 提取指定行的数据，转换为numpy数组
     Y3 = df3.iloc[target_row_indices].values.astype(float)
 
+    # 读取第四个CSV文件（位置4）
+    df4 = pd.read_csv(file_path4)
+    # 提取指定行的数据，转换为numpy数组
+    Y4 = df4.iloc[target_row_indices].values.astype(float)
+
     print(f"成功从CSV文件读取数据：")
     print(f"探针数组：{probes}")
     print(f"提取的行索引：{target_row_indices}")
     print(f"第一个文件 {file_path1} 提取行数：{len(Y1)}，列数：{Y1.shape[1]}")
     print(f"第二个文件 {file_path2} 提取行数：{len(Y2)}，列数：{Y2.shape[1]}")
     print(f"第三个文件 {file_path3} 提取行数：{len(Y3)}，列数：{Y3.shape[1]}")
+    print(f"第四个文件 {file_path4} 提取行数：{len(Y4)}，列数：{Y4.shape[1]}")
 
-    return probes, Y1, Y2, Y3
+    return probes, Y1, Y2, Y3, Y4
 
 
-def get_data_from_csv(csv_file1: str, csv_file2: str, csv_file3: str, num_probes: int) -> Tuple[List[FingerprintModel], List[Array], Dict[int, int]]:
+def get_data_from_csv(csv_file1: str, csv_file2: str, csv_file3: str, csv_file4: str, num_probes: int) -> Tuple[List[FingerprintModel], List[Array], Dict[int, int]]:
     """
     从CSV文件获取数据并创建FingerprintModel，替代原有的builtin_example
 
@@ -508,74 +550,131 @@ def get_data_from_csv(csv_file1: str, csv_file2: str, csv_file3: str, num_probes
     csv_file1 : 第一个CSV文件路径
     csv_file2 : 第二个CSV文件路径
     csv_file3 : 第三个CSV文件路径
+    csv_file4 : 第四个CSV文件路径
     num_probes : 探针数量
 
     Returns
     -------
-    models : 三个位置的FingerprintModel列表
-    [Y1, Y2, Y3] : 原始矩阵列表
+    models : 四个位置的FingerprintModel列表
+    [Y1, Y2, Y3, Y4] : 原始矩阵列表
     hue_mapping : 颜色映射字典
     """
     # 直接从CSV文件加载数据
-    probes, Y1, Y2, Y3 = load_data_from_csv(csv_file1, csv_file2, csv_file3, num_probes)
+    probes, Y1, Y2, Y3, Y4 = load_data_from_csv(csv_file1, csv_file2, csv_file3, csv_file4, num_probes)
 
-    # 提取三个位置的指纹模型
+    # 提取四个位置的指纹模型
     m1 = extract_fingerprint(probes, Y1)
     m2 = extract_fingerprint(probes, Y2)
     m3 = extract_fingerprint(probes, Y3)
+    m4 = extract_fingerprint(probes, Y4)
 
-    # 注意：由于探针数量是用户指定的，不再强制调整地址码方向
-    # 保持原始提取的地址码方向
-
-    # 生成hue_mapping，根据三个位置的z值特征选择合适的探针值
-    # -3: 三个位置的z值都是负值且绝对值更大的位置
-    # -1: 两个位置的z值为负，一个位置为正，且绝对值之和最大的位置
-    # 1: 两个位置的z值为正，一个位置为负，且绝对值之和最大的位置
-    # 3: 三个位置的z值都是正值且绝对值更大的位置
+    # 统一地址码方向：以位置1为参考，调整其他位置的地址码方向
+    # 计算每个位置与位置1的地址码相关系数
+    # 如果相关系数为负，说明方向相反，需要调整
+    c1 = m1.code
     
-    # 获取三个位置的z值
+    # 调整位置2的方向
+    c2 = m2.code
+    correlation_12 = calculate_correlation(c1, c2)
+    if correlation_12 < 0:
+        m2 = FingerprintModel(
+            probes=m2.probes,
+            Y=m2.Y,
+            trend=m2.trend,
+            residual=m2.residual,
+            w=-m2.w,
+            z=-m2.z,
+            code=-m2.code,
+        )
+        print("已调整位置2的地址码方向")
+    
+    # 调整位置3的方向
+    c3 = m3.code
+    correlation_13 = calculate_correlation(c1, c3)
+    if correlation_13 < 0:
+        m3 = FingerprintModel(
+            probes=m3.probes,
+            Y=m3.Y,
+            trend=m3.trend,
+            residual=m3.residual,
+            w=-m3.w,
+            z=-m3.z,
+            code=-m3.code,
+        )
+        print("已调整位置3的地址码方向")
+    
+    # 调整位置4的方向
+    c4 = m4.code
+    correlation_14 = calculate_correlation(c1, c4)
+    if correlation_14 < 0:
+        m4 = FingerprintModel(
+            probes=m4.probes,
+            Y=m4.Y,
+            trend=m4.trend,
+            residual=m4.residual,
+            w=-m4.w,
+            z=-m4.z,
+            code=-m4.code,
+        )
+        print("已调整位置4的地址码方向")
+
+    # 生成hue_mapping，根据四个位置的z值特征选择合适的探针值
+    
+    # 获取四个位置的z值
     z1 = m1.z
     z2 = m2.z
     z3 = m3.z
+    z4 = m4.z
     
     # 生成hue_mapping，从符号组合数组映射到probe
     hue_mapping = {}
     
-    # 所有可能的符号组合
+    # 所有可能的符号组合（这里只列举部分，实际应包含所有可能的4元素组合）
     possible_combinations = [
-        (1, 1, 1),    # symbol 3
-        (1, 1, -1),   # symbol 1
-        (1, -1, 1),   # symbol 1
-        (1, -1, -1),  # symbol -1
-        (-1, 1, 1),   # symbol 1
-        (-1, 1, -1),  # symbol -1
-        (-1, -1, 1),  # symbol -1
-        (-1, -1, -1)  # symbol -3
+        (1, 1, 1, 1),    # symbol 4
+        (1, 1, 1, -1),   # symbol 2
+        (1, 1, -1, 1),   # symbol 2
+        (1, 1, -1, -1),  # symbol 0
+        (1, -1, 1, 1),   # symbol 2
+        (1, -1, 1, -1),  # symbol 0
+        (1, -1, -1, 1),  # symbol 0
+        (1, -1, -1, -1), # symbol -2
+        (-1, 1, 1, 1),   # symbol 2
+        (-1, 1, 1, -1),  # symbol 0
+        (-1, 1, -1, 1),  # symbol 0
+        (-1, 1, -1, -1), # symbol -2
+        (-1, -1, 1, 1),  # symbol 0
+        (-1, -1, 1, -1), # symbol -2
+        (-1, -1, -1, 1), # symbol -2
+        (-1, -1, -1, -1) # symbol -4
     ]
     
     # 为每个组合选择合适的probe值
     for combination in possible_combinations:
-        c1, c2, c3 = combination
+        c1, c2, c3, c4 = combination
         
         # 计算每个位置的贡献
         # 对于c1=1，选择z1[i]为正且绝对值较大的位置
         # 对于c1=-1，选择z1[i]为负且绝对值较大的位置
-        # 同样处理c2和c3
+        # 同样处理c2、c3和c4
         candidates = []
         for i in range(len(z1)):
             # 检查当前位置的z值符号是否与组合匹配
             if (c1 > 0 and z1[i] > 0) or (c1 < 0 and z1[i] < 0) or (c1 == 0):
                 if (c2 > 0 and z2[i] > 0) or (c2 < 0 and z2[i] < 0) or (c2 == 0):
                     if (c3 > 0 and z3[i] > 0) or (c3 < 0 and z3[i] < 0) or (c3 == 0):
-                        # 计算得分：符号匹配的位置绝对值越大越好
-                        score = 0
-                        if c1 != 0:
-                            score += abs(z1[i]) * 2
-                        if c2 != 0:
-                            score += abs(z2[i]) * 2
-                        if c3 != 0:
-                            score += abs(z3[i]) * 2
-                        candidates.append((score, i))
+                        if (c4 > 0 and z4[i] > 0) or (c4 < 0 and z4[i] < 0) or (c4 == 0):
+                            # 计算得分：符号匹配的位置绝对值越大越好
+                            score = 0
+                            if c1 != 0:
+                                score += abs(z1[i]) * 2
+                            if c2 != 0:
+                                score += abs(z2[i]) * 2
+                            if c3 != 0:
+                                score += abs(z3[i]) * 2
+                            if c4 != 0:
+                                score += abs(z4[i]) * 2
+                            candidates.append((score, i))
         
         if candidates:
             # 选择得分最高的位置
@@ -592,16 +691,17 @@ def get_data_from_csv(csv_file1: str, csv_file2: str, csv_file3: str, num_probes
         print(f"组合 {combination} 映射到探针值: {probe}")
     print(f"hue_mapping: {hue_mapping}")
 
-    return [m1, m2, m3], [Y1, Y2, Y3], hue_mapping
+    return [m1, m2, m3, m4], [Y1, Y2, Y3, Y4], hue_mapping
 
 
 def main() -> None:
-    csv_file1 = "data\\15pro\\white\\1.csv"
-    csv_file2 = "data\\15pro\\white\\4.csv"
-    csv_file3 = "data\\15pro\\white\\5.csv"  # 新增第三个位置的CSV文件
+    csv_file1 = "data\\mate40pro\\黄\\1.csv"
+    csv_file2 = "data\\mate40pro\\黄\\7.csv"
+    csv_file3 = "data\\mate40pro\\黄\\17.csv"  # 新增第三个位置的CSV文件
+    csv_file4 = "data\\mate40pro\\黄\\27.csv"  # 新增第四个位置的CSV文件
     
     # 寻找最优探针数量
-    best_probe_count = find_optimal_probe_count(csv_file1, csv_file2, csv_file3, min_probes=5, max_probes=20)
+    best_probe_count = find_optimal_probe_count(csv_file1, csv_file2, csv_file3, csv_file4, min_probes=5, max_probes=25)
     
     # 使用最优探针数量进行实验
     num_probes = best_probe_count
@@ -609,26 +709,28 @@ def main() -> None:
     print(f"\n========== 使用最优探针数量 {num_probes} 进行实验 ==========")
     
     # 从CSV文件获取数据（替代原有的get_builtin_example()）
-    models, _, hue_mapping = get_data_from_csv(csv_file1, csv_file2, csv_file3, num_probes)
+    models, _, hue_mapping = get_data_from_csv(csv_file1, csv_file2, csv_file3, csv_file4, num_probes)
 
     print_model_summary("position 1", models[0])
     print_model_summary("position 2", models[1])
     print_model_summary("position 3", models[2])  # 新增打印第三个位置的模型摘要
+    print_model_summary("position 4", models[3])  # 新增打印第四个位置的模型摘要
 
     # Example in the paper/document:
-    # position1 sends 101, position2 sends 011, position3 sends 110
-    # blocks: (+1,-1,+1), (-1,-1,-1), (+1,+1,-1)
+    # position1 sends 101, position2 sends 011, position3 sends 110, position4 sends 001
+    # blocks: (+1,-1,+1,+1), (-1,-1,-1,-1), (+1,+1,-1,+1)
     bit_blocks_pm = [
-        np.array([-1, -1, +1]),  # 三个设备的发送值
-        np.array([-1, +1, -1]),
-        np.array([-1, +1, +1]),
-        np.array([+1, -1, +1]),
-        np.array([+1, -1, -1]),
-        np.array([-1, +1, +1]),
-        np.array([-1, +1, -1]),
-        np.array([-1, +1, -1]),
-        np.array([-1, +1, -1]),
-        np.array([-1, -1, +1]),
+        np.array([-1, -1, +1, +1]),  # 四个设备的发送值
+        np.array([-1, -1, -1, -1]),
+        np.array([-1, +1, +1, -1]),
+        np.array([+1, -1, -1, -1]),
+        np.array([-1, -1, +1, -1]),
+        np.array([-1, -1, +1, -1]),
+        np.array([-1, +1, +1, -1]),
+        np.array([-1, +1, -1, +1]),
+        np.array([-1, -1, -1, -1]),
+        np.array([-1, -1, +1, -1]),
+        
     ]
 
     results = simulate_blocks(models, bit_blocks_pm, hue_mapping)
