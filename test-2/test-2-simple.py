@@ -1,3 +1,21 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+位置自生指纹通信：最小可复现实验脚本
+
+覆盖流程：
+1. 对实测 Probe 响应做逐列线性去趋势
+2. 对残差矩阵做 SVD，提取本地读出方向 w
+3. 依据残差投影符号生成位置地址码 c
+4. 将多位置 bit 叠加为抽象发送序列 s
+5. 用 hue 映射生成发送 hue 序列
+6. 基于实测矩阵逐行查表，构造各位置的局部观测矩阵
+7. 对每个接收块做按列去中心化，再进行本地相关解码
+
+当前脚本从CSV文件读取数据，两个矩阵分别从两个CSV文件的第2、11、21、31、41、51、61行获取数据
+后续可替换CSV文件路径、hue_mapping / bit blocks，扩展到更多位置。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,8 +32,10 @@ class FingerprintModel:
     Y: Array  # shape: (P, D)实测矩阵
     trend: Array  # shape: (P, D)拟合趋势
     residual: Array  # shape: (P, D)Y-trend
-    w: Array  # shape: (D,)指纹方向，特征向量
-    z: Array  # shape: (P,)投影值
+    w: Array  # shape: (D,)第一指纹方向，特征向量
+    w2: Array  # shape: (D,)第二指纹方向，特征向量
+    z: Array  # shape: (P,)第一特征向量投影值
+    z2: Array  # shape: (P,)第二特征向量投影值
     code: Array  # shape: (P,)地址码
 
 
@@ -68,16 +88,25 @@ def extract_fingerprint(x: Array, Y: Array, force_positive_first: bool = True) -
 
     coeffs, trend = fit_linear_trend(x, Y)
     residual = Y - trend
+
     
+
     # SVD: residual = U S V^T
     _, _, Vt = np.linalg.svd(residual, full_matrices=False)
     w = Vt[0].copy()
     z = residual @ w
+    
+    # 提取第二特征向量
+    w2 = Vt[1].copy() if Vt.shape[0] > 1 else np.zeros_like(w)
+    z2 = residual @ w2
 
     if force_positive_first and z[0] < 0:
         w = -w
         z = -z
+        w2 = -w2
+        z2 = -z2
 
+    # 基于第一特征向量的投影生成地址码
     code = np.where(z >= 0, 1, -1)
 
     return FingerprintModel(
@@ -86,7 +115,9 @@ def extract_fingerprint(x: Array, Y: Array, force_positive_first: bool = True) -
         trend=trend,
         residual=residual,
         w=w,
+        w2=w2,
         z=z,
+        z2=z2,
         code=code,
     )
 
@@ -100,122 +131,41 @@ def bin_to_pm1(bits_bin: List[int]) -> Array:
     return np.where(bits_bin > 0, 1, -1)
 
 
-def calculate_correlation(c1: Array, c2: Array) -> float:
-    """
-    计算两个地址码之间的互相关指数
-    
-    Parameters
-    ----------
-    c1 : 第一个地址码数组
-    c2 : 第二个地址码数组
-    
-    Returns
-    -------
-    float : 互相关指数
-    """
-    # 确保两个数组长度相同
-    assert len(c1) == len(c2), "地址码长度必须相同"
-    
-    # 计算协方差
-    covariance = np.cov(c1, c2)[0, 1]
-    
-    # 计算标准差
-    std1 = np.std(c1)
-    std2 = np.std(c2)
-    
-    # 避免除零错误
-    if std1 == 0 or std2 == 0:
-        return 0.0
-    
-    # 计算互相关指数
-    correlation = covariance / (std1 * std2)
-    return correlation
-
-
-def find_optimal_probe_count(csv_file1: str, csv_file2: str, csv_file3: str, min_probes: int = 5, max_probes: int = 15) -> int:
-    """
-    遍历探针数量，找到地址码最大互相关指数最小的探针数量
-    
-    Parameters
-    ----------
-    csv_file1 : 第一个CSV文件路径
-    csv_file2 : 第二个CSV文件路径
-    csv_file3 : 第三个CSV文件路径
-    min_probes : 最小探针数量
-    max_probes : 最大探针数量
-    
-    Returns
-    -------
-    int : 最优探针数量
-    """
-    best_probe_count = min_probes
-    min_max_correlation = float('inf')
-    
-    
-    for num_probes in range(min_probes, max_probes + 1):
-        # 加载数据
-        probes, Y1, Y2, Y3 = load_data_from_csv(csv_file1, csv_file2, csv_file3, num_probes)
-        
-        # 提取指纹模型
-        m1 = extract_fingerprint(probes, Y1)
-        m2 = extract_fingerprint(probes, Y2)
-        m3 = extract_fingerprint(probes, Y3)
-        
-        # 获取地址码
-        c1 = m1.code
-        c2 = m2.code
-        c3 = m3.code
-        
-        # 计算互相关指数
-        rho12 = abs(calculate_correlation(c1, c2))
-        rho13 = abs(calculate_correlation(c1, c3))
-        rho23 = abs(calculate_correlation(c2, c3))
-        
-        # 计算最大互相关指数
-        max_correlation = max(rho12, rho13, rho23)
-        
-        
-        # 更新最优值
-        if max_correlation < min_max_correlation:
-            min_max_correlation = max_correlation
-            best_probe_count = num_probes
-    
-    print(f"\n最优探针数量: {best_probe_count}, 最小ρmax: {min_max_correlation:.4f}")
-    return best_probe_count
-
-
 # =========================
 # Encoding / observation
 # =========================
 
-def build_symbol_sequence(bits_pm: Array, codes: List[Array]) -> Tuple[Array, List[List[int]]]:
-    """s = sum_i b_i c_i，同时返回符号组合序列"""
+def build_symbol_sequence(bits_pm: Array, codes: List[Array], codes2: List[Array]) -> Tuple[Array, Array]:
+    """s = sum_i b_i c_i，同时使用第一和第二特征向量的地址码"""
     bits_pm = np.asarray(bits_pm, dtype=int)
-    out = np.zeros_like(codes[0], dtype=int)
-    symbol_combinations = []
+    out1 = np.zeros_like(codes[0], dtype=int)
+    out2 = np.zeros_like(codes2[0], dtype=int)
     
-    # 对每个探针位置计算符号组合
-    for i in range(len(codes[0])):
-        combination = []
-        for b, c in zip(bits_pm, codes):
-            contribution = int(b) * int(c[i])
-            combination.append(contribution)
-            out[i] += contribution
-        symbol_combinations.append(combination)
+    for b, c, c2 in zip(bits_pm, codes, codes2):
+        out1 += int(b) * np.asarray(c, dtype=int)
+        out2 += int(b) * np.asarray(c2, dtype=int)
     
-    return out, symbol_combinations
+    return out1, out2
 
 
-def map_symbol_to_hue(symbol_seq: Array, symbol_combinations: List[List[int]], hue_mapping: Dict[tuple, int]) -> Array:
-    """根据符号组合映射到hue值"""
+def map_symbol_to_hue(symbol_seq1: Array, symbol_seq2: Array, hue_mapping: Dict[int, int]) -> Array:
+    """根据两个特征向量的符号序列映射到hue值"""
     hue_seq = []
-    for i, combination in enumerate(symbol_combinations):
-        # 将组合转换为元组作为字典键
-        key = tuple(combination)
-        if key in hue_mapping:
-            hue_seq.append(hue_mapping[key])
+    for s1, s2 in zip(symbol_seq1, symbol_seq2):
+        # 融合两个特征向量的符号，第一特征向量权重更高
+        combined_symbol = int(0.7 * s1 + 0.3 * s2)
+        # 确保符号值为-2, 0, 或 2
+        if combined_symbol > 1:
+            combined_symbol = 2
+        elif combined_symbol < -1:
+            combined_symbol = -2
         else:
-            # 如果没有找到对应的组合，使用默认值
+            combined_symbol = 0
+        
+        if combined_symbol in hue_mapping:
+            hue_seq.append(hue_mapping[combined_symbol])
+        else:
+            # 如果没有找到对应的符号，使用默认值
             hue_seq.append(0)
     return np.array(hue_seq, dtype=int)
 
@@ -244,30 +194,45 @@ def observe_block_from_measured_matrix(hue_seq: Array, Y: Array, probe_to_row: D
 # Local decoding
 # =========================
 
-def decode_local_block(Y_obs: Array, w: Array, code: Array) -> DecodeResult:
+def decode_local_block(Y_obs: Array, w: Array, w2: Array, code: Array) -> DecodeResult:
     """
-    严格按论文/汇报中的流程：
+    考虑第二特征向量的解码流程：
     1) 对当前块按列去中心化
-    2) u = Y_centered @ w
-    3) gamma = c^T u
-    4) gamma > 0 判 +1 / bit=1，否则判 -1 / bit=0
+    2) u1 = Y_centered @ w1（第一特征向量投影）
+    3) u2 = Y_centered @ w2（第二特征向量投影）
+    4) gamma1 = c^T u1（第一特征向量相关检测值）
+    5) gamma2 = c^T u2（第二特征向量相关检测值）
+    6) 融合两个特征向量的信息进行判决
     """
     Y_obs = np.asarray(Y_obs, dtype=float)
     w = np.asarray(w, dtype=float)
+    w2 = np.asarray(w2, dtype=float)
     code = np.asarray(code, dtype=float)
 
     mean_vec = Y_obs.mean(axis=0)
     Y_centered = Y_obs - mean_vec
-    u = Y_centered @ w
-    gamma = float(code @ u)
+    
+    # 计算两个特征向量的投影
+    u1 = Y_centered @ w
+    u2 = Y_centered @ w2
+    
+    # 计算相关检测值
+    gamma1 = float(code @ u1)
+    gamma2 = float(code @ u2)
+    
+    # 融合两个gamma值，第一特征向量权重更高
+    gamma = 0.7 * gamma1 + 0.3 * gamma2
+    
+    # 基于融合后的gamma值判决
     bit_hat_pm = 1 if gamma > 0 else -1
     bit_hat_bin = 1 if bit_hat_pm > 0 else 0
+    
     return DecodeResult(
         Y_obs=Y_obs,
         mean_vec=mean_vec,
         Y_centered=Y_centered,
-        u=u,
-        gamma=gamma,
+        u=u1,  # 保持向后兼容，返回第一特征向量的投影
+        gamma=gamma,  # 返回融合后的gamma值
         bit_hat_pm=bit_hat_pm,
         bit_hat_bin=bit_hat_bin,
     )
@@ -301,25 +266,27 @@ def simulate_blocks(
       - per_pos decode result
     """
     codes = [m.code for m in models]
+    codes2 = [m.code for m in models]  # 使用相同的地址码，因为第二特征向量的投影也用于生成地址码
     probe_to_row = build_probe_to_row(models[0].probes)
     results = []
 
     for bits_pm in bit_blocks_pm:
         bits_pm = np.asarray(bits_pm, dtype=int)
-        symbol_seq, symbol_combinations = build_symbol_sequence(bits_pm, codes)
-        hue_seq = map_symbol_to_hue(symbol_seq, symbol_combinations, hue_mapping)
+        symbol_seq1, symbol_seq2 = build_symbol_sequence(bits_pm, codes, codes2)
+        hue_seq = map_symbol_to_hue(symbol_seq1, symbol_seq2, hue_mapping)
 
         block_info = {
             "bits_pm": bits_pm,
             "bits_bin": pm1_to_bin(bits_pm),
-            "symbol_seq": symbol_seq,
+            "symbol_seq": symbol_seq1,  # 保持向后兼容，存储第一特征向量的符号序列
+            "symbol_seq2": symbol_seq2,  # 新增：存储第二特征向量的符号序列
             "hue_seq": hue_seq,
             "per_position": [],
         }
 
         for pos_idx, model in enumerate(models):
             Y_obs = observe_block_from_measured_matrix(hue_seq, model.Y, probe_to_row)
-            dec = decode_local_block(Y_obs, model.w, model.code)
+            dec = decode_local_block(Y_obs, model.w, model.w2, model.code)
             block_info["per_position"].append(dec)
 
         results.append(block_info)
@@ -335,6 +302,9 @@ def arr_str(a: Array, precision: int = 2) -> str:
     if np.issubdtype(a.dtype, np.integer):
         return np.array2string(a, separator=', ')
     return np.array2string(a, precision=precision, suppress_small=False, separator=', ')
+
+
+
 
 
 
@@ -374,18 +344,19 @@ def generate_probes(num_probes: int, max_row_index: int) -> np.ndarray:
             probe = max_probe
         probes.append(probe)
     
+   
+    
     return np.array(probes, dtype=float)
 
 
-def load_data_from_csv(file_path1: str, file_path2: str, file_path3: str, num_probes: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def load_data_from_csv(file_path1: str, file_path2: str, num_probes: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    从三个CSV文件读取数据，根据探针数量提取对应行作为Y1、Y2和Y3矩阵
+    从两个CSV文件读取数据，根据探针数量提取对应行作为Y1和Y2矩阵
 
     Parameters
     ----------
     file_path1 : 第一个CSV文件路径（对应位置1）
     file_path2 : 第二个CSV文件路径（对应位置2）
-    file_path3 : 第三个CSV文件路径（对应位置3）
     num_probes : 探针数量
 
     Returns
@@ -393,7 +364,6 @@ def load_data_from_csv(file_path1: str, file_path2: str, file_path3: str, num_pr
     probes : 探针数组
     Y1 : 位置1的实测矩阵
     Y2 : 位置2的实测矩阵
-    Y3 : 位置3的实测矩阵
     """
     # 读取第一个CSV文件（位置1）获取行数
     df1 = pd.read_csv(file_path1)
@@ -416,15 +386,10 @@ def load_data_from_csv(file_path1: str, file_path2: str, file_path3: str, num_pr
     # 提取指定行的数据，转换为numpy数组
     Y2 = df2.iloc[target_row_indices].values.astype(float)
 
-    # 读取第三个CSV文件（位置3）
-    df3 = pd.read_csv(file_path3)
-    # 提取指定行的数据，转换为numpy数组
-    Y3 = df3.iloc[target_row_indices].values.astype(float)
-
-    return probes, Y1, Y2, Y3
+    return probes, Y1, Y2
 
 
-def get_data_from_csv(csv_file1: str, csv_file2: str, csv_file3: str, num_probes: int) -> Tuple[List[FingerprintModel], List[Array], Dict[int, int]]:
+def get_data_from_csv(csv_file1: str, csv_file2: str, num_probes: int) -> Tuple[List[FingerprintModel], List[Array], Dict[int, int]]:
     """
     从CSV文件获取数据并创建FingerprintModel，替代原有的builtin_example
 
@@ -432,127 +397,127 @@ def get_data_from_csv(csv_file1: str, csv_file2: str, csv_file3: str, num_probes
     ----------
     csv_file1 : 第一个CSV文件路径
     csv_file2 : 第二个CSV文件路径
-    csv_file3 : 第三个CSV文件路径
     num_probes : 探针数量
 
     Returns
     -------
-    models : 三个位置的FingerprintModel列表
-    [Y1, Y2, Y3] : 原始矩阵列表
+    models : 两个位置的FingerprintModel列表
+    [Y1, Y2] : 原始矩阵列表
     hue_mapping : 颜色映射字典
     """
     # 直接从CSV文件加载数据
-    probes, Y1, Y2, Y3 = load_data_from_csv(csv_file1, csv_file2, csv_file3, num_probes)
+    probes, Y1, Y2 = load_data_from_csv(csv_file1, csv_file2, num_probes)
 
-    # 提取三个位置的指纹模型
+    # 提取两个位置的指纹模型
     m1 = extract_fingerprint(probes, Y1)
     m2 = extract_fingerprint(probes, Y2)
-    m3 = extract_fingerprint(probes, Y3)
 
     # 注意：由于探针数量是用户指定的，不再强制调整地址码方向
     # 保持原始提取的地址码方向
 
-    # 生成hue_mapping，根据三个位置的z值特征选择合适的探针值
-    # -3: 三个位置的z值都是负值且绝对值更大的位置
-    # -1: 两个位置的z值为负，一个位置为正，且绝对值之和最大的位置
-    # 1: 两个位置的z值为正，一个位置为负，且绝对值之和最大的位置
-    # 3: 三个位置的z值都是正值且绝对值更大的位置
+    # 生成hue_mapping，根据两个位置的z值特征选择合适的探针值
+    # -2: 两个位置的z值都是负值且绝对值更大的位置
+    # 0: 两个位置的z值有正有负，绝对值接近于0的位置
+    # 2: 两个位置的z值都大于0且绝对值更大的位置
     
-    # 获取三个位置的z值
+    # 获取两个位置的z值
     z1 = m1.z
     z2 = m2.z
-    z3 = m3.z
     
-    # 生成hue_mapping，从符号组合数组映射到probe
-    hue_mapping = {}
-    
-    # 所有可能的符号组合
-    possible_combinations = [
-        (1, 1, 1),    # symbol 3
-        (1, 1, -1),   # symbol 1
-        (1, -1, 1),   # symbol 1
-        (1, -1, -1),  # symbol -1
-        (-1, 1, 1),   # symbol 1
-        (-1, 1, -1),  # symbol -1
-        (-1, -1, 1),  # symbol -1
-        (-1, -1, -1)  # symbol -3
-    ]
-    
-    # 为每个组合选择合适的probe值
-    for combination in possible_combinations:
-        c1, c2, c3 = combination
+    # 计算每个位置的特征
+    features = []
+    for i in range(len(z1)):
+        z1_val = z1[i]
+        z2_val = z2[i]
         
-        # 计算每个位置的贡献
-        # 对于c1=1，选择z1[i]为正且绝对值较大的位置
-        # 对于c1=-1，选择z1[i]为负且绝对值较大的位置
-        # 同样处理c2和c3
-        candidates = []
-        for i in range(len(z1)):
-            # 检查当前位置的z值符号是否与组合匹配
-            if (c1 > 0 and z1[i] > 0) or (c1 < 0 and z1[i] < 0) or (c1 == 0):
-                if (c2 > 0 and z2[i] > 0) or (c2 < 0 and z2[i] < 0) or (c2 == 0):
-                    if (c3 > 0 and z3[i] > 0) or (c3 < 0 and z3[i] < 0) or (c3 == 0):
-                        # 计算得分：符号匹配的位置绝对值越大越好
-                        score = 0
-                        if c1 != 0:
-                            score += abs(z1[i]) * 2
-                        if c2 != 0:
-                            score += abs(z2[i]) * 2
-                        if c3 != 0:
-                            score += abs(z3[i]) * 2
-                        candidates.append((score, i))
+        # 计算特征：
+        # 1. 两个值是否都为负
+        both_negative = z1_val < 0 and z2_val < 0
+        # 2. 两个值是否都为正
+        both_positive = z1_val > 0 and z2_val > 0
+        # 3. 两个值是否有正有负
+        mixed_sign = not (both_negative or both_positive)
+        # 4. 绝对值之和（用于比较大小）
+        abs_sum = abs(z1_val) + abs(z2_val)
+        # 5. 绝对值之和的倒数（用于比较接近0的程度）
+        near_zero_score = 1 / (abs_sum + 1e-10)  # 避免除零
         
-        if candidates:
-            # 选择得分最高的位置
-            candidates.sort(reverse=True)
-            best_index = candidates[0][1]
-            hue_mapping[combination] = int(probes[best_index])
-        else:
-            # 如果没有符合条件的，使用默认值
-            hue_mapping[combination] = int(probes[len(probes)//2])
+        features.append({
+            'index': i,
+            'both_negative': both_negative,
+            'both_positive': both_positive,
+            'mixed_sign': mixed_sign,
+            'abs_sum': abs_sum,
+            'near_zero_score': near_zero_score
+        })
+    
+    # 选择-2的映射：两个值都为负且绝对值之和最大的位置
+    negative_candidates = [f for f in features if f['both_negative']]
+    if negative_candidates:
+        negative_candidates.sort(key=lambda x: x['abs_sum'], reverse=True)
+        neg_index = negative_candidates[0]['index']
+    else:
+        # 如果没有符合条件的，选择第一个位置
+        neg_index = 0
+    
+    # 选择2的映射：两个值都为正且绝对值之和最大的位置
+    positive_candidates = [f for f in features if f['both_positive']]
+    if positive_candidates:
+        positive_candidates.sort(key=lambda x: x['abs_sum'], reverse=True)
+        pos_index = positive_candidates[0]['index']
+    else:
+        # 如果没有符合条件的，选择最后一个位置
+        pos_index = len(probes) - 1
+    
+    # 选择0的映射：两个值有正有负且绝对值之和最小的位置
+    mixed_candidates = [f for f in features if f['mixed_sign']]
+    if mixed_candidates:
+        mixed_candidates.sort(key=lambda x: x['abs_sum'])
+        zero_index = mixed_candidates[0]['index']
+    else:
+        # 如果没有符合条件的，选择中间位置
+        zero_index = len(probes) // 2
+    
+    # 生成hue_mapping
+    hue_mapping = {
+        -2: int(probes[neg_index]),
+        0: int(probes[zero_index]),
+        2: int(probes[pos_index])
+    }
     
 
-        
-    
 
-    return [m1, m2, m3], [Y1, Y2, Y3], hue_mapping
+    return [m1, m2], [Y1, Y2], hue_mapping
 
 
 def main() -> None:
-    csv_file1 = "data\\mate40pro\\mid\\1.csv"
-    csv_file2 = "data\\mate40pro\\mid\\4.csv"
-    csv_file3 = "data\\mate40pro\\mid\\6.csv"  # 新增第三个位置的CSV文件
+    csv_file1 = "data\\15pro\\yellow\\12.csv"
+    csv_file2 = "data\\15pro\\yellow\\14.csv"
     
-    # 寻找最优探针数量
-    best_probe_count = find_optimal_probe_count(csv_file1, csv_file2, csv_file3, min_probes=5, max_probes=20)
-    
-    # 使用最优探针数量进行实验
-    num_probes = best_probe_count
-    
-    
+    # 指定探针数量
+    num_probes = 15
     
     # 从CSV文件获取数据（替代原有的get_builtin_example()）
-    models, _, hue_mapping = get_data_from_csv(csv_file1, csv_file2, csv_file3, num_probes)
-
+    models, _, hue_mapping = get_data_from_csv(csv_file1, csv_file2, num_probes)
 
     # Example in the paper/document:
-    # position1 sends 101, position2 sends 011, position3 sends 110
-    # blocks: (+1,-1,+1), (-1,-1,-1), (+1,+1,-1)
+    # position1 sends 101, position2 sends 011
+    # blocks: (+1,-1), (-1,+1), (+1,+1)
     bit_blocks_pm = [
-        np.array([-1, -1, +1]),  # 三个设备的发送值
-        np.array([-1, +1, -1]),
-        np.array([-1, +1, +1]),
-        np.array([+1, -1, +1]),
-        np.array([+1, -1, -1]),
-        np.array([-1, +1, +1]),
-        np.array([-1, +1, -1]),
-        np.array([-1, +1, -1]),
-        np.array([-1, +1, -1]),
-        np.array([-1, -1, +1]),
+        np.array([+1, -1]),
+        np.array([-1, -1]),
+        np.array([-1, +1]),
+        np.array([-1, -1]),
+        np.array([-1, +1]),
+        np.array([-1, +1]),
     ]
+
     results = simulate_blocks(models, bit_blocks_pm, hue_mapping)
 
-
+    # =============================
+    # 逐 block 打印
+    # =============================
+    
     # =============================
     # 按设备整理发送与接收数据（只执行一次）
     # =============================
@@ -576,15 +541,6 @@ def main() -> None:
         for p in range(num_pos):
             tx_bits[p].append(int(bits_tx[p]))
             rx_bits[p].append(int(bits_rx[p]))
-
-            print("发送端：")
-    for i in range(num_pos):
-        print(f"position{i + 1}: {tx_bits[i]}")
-
-    print("\n接收端：")
-    for i in range(num_pos):
-        print(f"position{i + 1}: {rx_bits[i]}")
-
 
 
 

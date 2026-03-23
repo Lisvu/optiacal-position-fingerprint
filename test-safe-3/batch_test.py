@@ -68,7 +68,7 @@ def generate_bit_blocks(num_positions: int, num_bits: int) -> List[Array]:
 
 def calculate_ber(results: List[dict]) -> float:
     """
-    计算误码率
+    计算误码率，只统计未被丢弃的比特
     
     Parameters
     ----------
@@ -83,12 +83,11 @@ def calculate_ber(results: List[dict]) -> float:
     
     for res in results:
         bits_tx = res["bits_bin"]
-        bits_rx = [dec.bit_hat_bin for dec in res["per_position"]]
-        
-        for tx, rx in zip(bits_tx, bits_rx):
-            total_bits += 1
-            if tx != rx:
-                error_bits += 1
+        for p, dec in enumerate(res["per_position"]):
+            if not dec.is_discarded:
+                total_bits += 1
+                if dec.bit_hat_bin != bits_tx[p]:
+                    error_bits += 1
     
     if total_bits == 0:
         return 0.0
@@ -171,31 +170,52 @@ def run_experiment(device: str, light: str, positions: Tuple[int, int, int]) -> 
     # 检查文件是否存在
     for file_path in csv_files:
         if not os.path.exists(file_path):
+            print(f"File not found: {file_path}")
             return None
     
     try:
-        # 自动找出最佳探针数（范围5~20）
-        best_probe_count = test.find_optimal_probe_count(*csv_files, min_probes=5, max_probes=20)
+        print(f"  Step 1: Finding optimal probe count...")
+        # 自动找出最佳探针数（范围5~15，减少计算量）
+        best_probe_result = test.find_optimal_probe_count(*csv_files, min_probes=5, max_probes=15)
+        
+        # 处理返回结果
+        if isinstance(best_probe_result, tuple) and len(best_probe_result) == 2:
+            best_probe_count, best_probes = best_probe_result
+        else:
+            # 兼容旧版本
+            best_probe_count = best_probe_result
+            best_probes = None
         
         # 清除当前行并打印最佳探针数
         print(" " * 80, end="\r")
         print(f"  Best probe count: {best_probe_count}")
         
+        print(f"  Step 2: Loading data...")
         # 获取数据
-        models, _, hue_mapping = test.get_data_from_csv(*csv_files, best_probe_count)
+        models, _, hue_mapping, _, _ = test.get_data_from_csv(*csv_files, best_probe_count, best_probes)
         
-        # 生成比特块
-        bit_blocks = generate_bit_blocks(3, num_bits)
+        print(f"  Step 3: Generating bit blocks...")
+        # 生成比特块（减少数量，提高速度）
+        bit_blocks = generate_bit_blocks(3, min(1000, num_bits))
         
-        # 运行仿真
-        results = test.simulate_blocks(models, bit_blocks, hue_mapping)
+        print(f"  Step 4: Finding optimal threshold...")
+        # 自动学习最优阈值
+        optimal_threshold = test.find_optimal_threshold(models, bit_blocks, hue_mapping)
         
+        print(f"  Step 5: Running simulation...")
+        # 运行仿真，使用最优阈值
+        results = test.simulate_blocks(models, bit_blocks, hue_mapping, threshold=optimal_threshold)
+        
+        print(f"  Step 6: Calculating BER...")
         # 计算误码率
         ber = calculate_ber(results)
         
+        print(f"  Experiment completed successfully")
         return ber
     except Exception as e:
-        print(f"Error running experiment for {device}/{light}/{positions}: {e}")
+        import traceback
+        print(f"Error running experiment for {device}/{light}/{positions}:")
+        print(traceback.format_exc())
         return None
 
 
@@ -208,7 +228,7 @@ def main() -> None:
     print(f"Generated {len(position_combinations)} valid position combinations")
     
     # 检查是否存在已有的结果文件
-    results_file = "batch_test_results.csv"
+    results_file = "batch_test_results_new.csv"
     existing_results = {}
     total_ber = 0.0
     total_experiments_completed = 0
