@@ -29,7 +29,7 @@ COMBINATION_SIZE = 5
 SAMPLE_COUNT = 20
 RESULTS_FILENAME = "batch_test_results_optimized_v2.csv"
 ZERO_BER_RESULTS_FILENAME = "batch_test_zero_ber_results.csv"
-SEARCH_ATTEMPTS_PER_COMBINATION = 3
+TARGET_BEST_BER = 0.07
 
 
 def generate_position_combinations(n: int, k: int) -> Iterable[tuple[int, ...]]:
@@ -186,9 +186,11 @@ def run_batch_experiment() -> str:
                 continue
 
             print(f"[{idx}/{len(combinations)}] processing position combination {combination}")
+            attempt = 0
             best_result = None
-            for attempt in range(1, SEARCH_ATTEMPTS_PER_COMBINATION + 1):
-                print(f"  search attempt {attempt}/{SEARCH_ATTEMPTS_PER_COMBINATION}")
+            while True:
+                attempt += 1
+                print(f"  search attempt {attempt}: current target best BER < {TARGET_BEST_BER:.3f}")
                 result = test.run_position_experiment(
                     csv_files=csv_files,
                     search_bits=10000,
@@ -202,8 +204,20 @@ def run_batch_experiment() -> str:
                     print(f"  updated best BER in this batch search: {best_result['best_ber']:.6f}")
 
                 if best_result["best_ber"] <= 0.0:
-                    print("  found BER=0 probe set, stopping this position combination early.")
+                    print("  found BER=0 probe set, stopping search for this position combination.")
                     break
+
+                if best_result["best_ber"] < TARGET_BEST_BER:
+                    print(
+                        f"  best BER {best_result['best_ber']:.6f} reached the target threshold, "
+                        "stopping search for this position combination."
+                    )
+                    break
+
+                print(
+                    f"  best BER so far {best_result['best_ber']:.6f} is above or equal to "
+                    f"{TARGET_BEST_BER:.3f}, continuing search..."
+                )
 
             if best_result is None:
                 raise RuntimeError(f"Failed to obtain a search result for position combination {combination}")
@@ -258,6 +272,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-

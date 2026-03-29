@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Security-aware batch experiment for 4-position combinations.
+
+Compared with batch_test.py, this script keeps the original legal BER search
+logic but adds a security constraint:
+1. legal test BER must be <= 0.02
+2. the worst illegal single-route BER across all illegal positions and all
+   legal routes must be > 0.3
+3. among secure candidates, prefer the one whose worst illegal single-route BER
+   is closest to 0.5
+"""
+
+from __future__ import annotations
+
+import ast
+import csv
+import itertools
+import os
+import random
+import sys
+from typing import Iterable, Sequence
+
+import numpy as np
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+import security_illegal_position_validation as security_eval
+import test_4_simple as test
+
+
+TOTAL_POSITIONS = 28
+COMBINATION_SIZE = 4
+SAMPLE_COUNT = 20
+RESULTS_FILENAME = "batch_test_results_security_aware.csv"
+TARGET_LEGAL_TEST_BER = 0.02
+MIN_ILLEGAL_SINGLE_BER_THRESHOLD = 0.3
+TARGET_ILLEGAL_SINGLE_BER = 0.5
+SEARCH_BITS = 10000
+TEST_BITS = 10000
+SECURITY_SEARCH_BITS = 3000
+SECURITY_CONFIRM_BITS = 10000
+MAX_SEARCH_ATTEMPTS = 8
+
+
+def generate_position_combinations(n: int, k: int) -> Iterable[tuple[int, ...]]:
+    return itertools.combinations(range(1, n + 1), k)
+
+
+def generate_unseen_random_position_combinations(
+    n: int,
+    k: int,
+    sample_count: int,
+    seed: int | None,
+    processed_combinations: set[str],
+) -> list[tuple[int, ...]]:
+    remaining = [
+        combination
+        for combination in generate_position_combinations(n, k)
+        if str(combination) not in processed_combinations
+    ]
+    if not remaining:
+        return []
+
+    rng = random.Random(seed)
+    sample_size = min(sample_count, len(remaining))
+    selected = rng.sample(remaining, sample_size)
+    selected.sort()
+    return selected
+
+
+def parse_position_combination(value: str) -> tuple[int, ...]:
+    parsed = ast.literal_eval(value)
+    if not isinstance(parsed, tuple):
+        raise ValueError(f"Invalid position combination: {value}")
+    return tuple(int(v) for v in parsed)
+
+
+def format_probes(probes: Sequence[float]) -> str:
+    return "[" + ", ".join(f"{float(v):.1f}" for v in probes) + "]"
+
+
+def load_existing_results(results_file: str) -> list[dict]:
+    if not os.path.exists(results_file):
+        return []
+
+    with open(results_file, "r", newline="", encoding="utf-8-sig") as f:
+        return list(csv.DictReader(f))
+
+
+def normalize_results_file(results_file: str) -> tuple[set[str], float, int]:
+    existing_rows = load_existing_results(results_file)
+    processed: set[str] = set()
+    cumulative_sum = 0.0
+    completed_count = 0
+    fieldnames = [
+        "position_combination",
+        "best_probe_count",
+        "best_probes",
+        "best_ber",
+        "test_ber",
+        "min_illegal_single_ber",
+        "average_illegal_single_ber",
+        "worst_illegal_position",
+        "worst_legal_position",
+        "security_bits",
+        "security_satisfied",
+        "illegal_distance_to_half",
+        "attempt_count",
+        "cumulative_test_ber",
+    ]
+
+    if not existing_rows:
+        with open(results_file, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+        return processed, cumulative_sum, completed_count
+
+    normalized_rows = []
+    for row in existing_rows:
+        position_combination = row["position_combination"]
+        test_ber = float(row["test_ber"])
+        cumulative_sum += test_ber
+        completed_count += 1
+        cumulative_test_ber = cumulative_sum / completed_count
+
+        normalized_rows.append({
+            "position_combination": position_combination,
+            "best_probe_count": row["best_probe_count"],
+            "best_probes": row["best_probes"],
+            "best_ber": row["best_ber"],
+            "test_ber": row["test_ber"],
+            "min_illegal_single_ber": row["min_illegal_single_ber"],
+            "average_illegal_single_ber": row["average_illegal_single_ber"],
+            "worst_illegal_position": row["worst_illegal_position"],
+            "worst_legal_position": row["worst_legal_position"],
+            "security_bits": row["security_bits"],
+            "security_satisfied": row["security_satisfied"],
+            "illegal_distance_to_half": row["illegal_distance_to_half"],
+            "attempt_count": row.get("attempt_count", ""),
+            "cumulative_test_ber": f"{cumulative_test_ber:.6f}",
+        })
+        processed.add(position_combination)
+
+    with open(results_file, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(normalized_rows)
+
+    return processed, cumulative_sum, completed_count
+
+
+def evaluate_security_for_probe_set(
+    project_root: str,
+    legal_positions: Sequence[int],
+    probes: Sequence[float],
+    num_bits: int,
+    rng_seed: int,
+) -> dict:
+    legal_csv_files = test.build_csv_files_for_positions(
+        project_root,
+        legal_positions,
+        light_condition=security_eval.LIGHT_CONDITION,
+    )
+    legal_models, hue_mapping = test.build_models_from_probes(
+        legal_csv_files,
+        np.asarray(probes, dtype=float),
+        mapping_eval_bits=security_eval.MAPPING_EVAL_BITS,
+        mapping_top_k=security_eval.MAPPING_TOP_K,
+        rng=random.Random(rng_seed),
+    )
+
+    available_positions = security_eval.get_available_positions(project_root, security_eval.LIGHT_CONDITION)
+    illegal_positions = [pos for pos in available_positions if pos not in legal_positions]
+    worst_illegal_position = None
+    worst_legal_position = None
+    min_illegal_single_ber = float("inf")
+    all_single_bers: list[float] = []
+
+    rng = random.Random(rng_seed + 9973)
+    for illegal_position in illegal_positions:
+        illegal_csv_file = test.build_csv_files_for_positions(
+            project_root,
+            [illegal_position],
+            light_condition=security_eval.LIGHT_CONDITION,
+        )[0]
+        position_bers, _ = security_eval.evaluate_illegal_position_against_legal_bits(
+            legal_models=legal_models,
+            hue_mapping=hue_mapping,
+            illegal_csv_file=illegal_csv_file,
+            probes=probes,
+            num_bits=num_bits,
+            rng=random.Random(rng.randrange(0, 2**31)),
+        )
+        all_single_bers.extend(float(v) for v in position_bers)
+        local_min = min((float(ber), idx) for idx, ber in enumerate(position_bers))
+        if local_min[0] < min_illegal_single_ber:
+            min_illegal_single_ber = local_min[0]
+            worst_illegal_position = illegal_position
+            worst_legal_position = legal_positions[local_min[1]]
+
+    average_illegal_single_ber = (
+        sum(all_single_bers) / len(all_single_bers) if all_single_bers else 0.0
+    )
+    return {
+        "min_illegal_single_ber": float(min_illegal_single_ber if all_single_bers else 0.0),
+        "average_illegal_single_ber": float(average_illegal_single_ber),
+        "worst_illegal_position": worst_illegal_position,
+        "worst_legal_position": worst_legal_position,
+        "security_bits": num_bits,
+    }
+
+
+def attach_security_metrics(result: dict, security_metrics: dict) -> dict:
+    merged = dict(result)
+    merged.update(security_metrics)
+    merged["illegal_distance_to_half"] = abs(
+        float(merged["min_illegal_single_ber"]) - TARGET_ILLEGAL_SINGLE_BER
+    )
+    merged["security_satisfied"] = (
+        float(merged["test_ber"]) <= TARGET_LEGAL_TEST_BER
+        and float(merged["min_illegal_single_ber"]) > MIN_ILLEGAL_SINGLE_BER_THRESHOLD
+    )
+    return merged
+
+
+def candidate_rank_key(candidate: dict) -> tuple:
+    satisfied = 0 if candidate["security_satisfied"] else 1
+    distance_to_half = float(candidate["illegal_distance_to_half"])
+    legal_test_ber = float(candidate["test_ber"])
+    security_floor = -float(candidate["min_illegal_single_ber"])
+    best_ber = float(candidate["best_ber"])
+    return (satisfied, distance_to_half, legal_test_ber, security_floor, best_ber)
+
+
+def run_batch_experiment() -> str:
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    results_file = os.path.join(project_root, "test-4", RESULTS_FILENAME)
+
+    processed_combinations, cumulative_sum, completed_count = normalize_results_file(results_file)
+    combinations = generate_unseen_random_position_combinations(
+        TOTAL_POSITIONS,
+        COMBINATION_SIZE,
+        SAMPLE_COUNT,
+        None,
+        processed_combinations,
+    )
+
+    print(f"Randomly selected {len(combinations)} new position combinations")
+
+    with open(results_file, "a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+
+        for idx, combination in enumerate(combinations, start=1):
+            combination_str = str(combination)
+            if combination_str in processed_combinations:
+                print(f"[{idx}/{len(combinations)}] position combination {combination} already completed, skipping")
+                continue
+
+            csv_files = test.build_csv_files_for_positions(project_root, combination, light_condition="white")
+            if not all(os.path.exists(path) for path in csv_files):
+                print(f"[{idx}/{len(combinations)}] position combination {combination} is missing data files, skipping")
+                continue
+
+            print(f"[{idx}/{len(combinations)}] processing security-aware combination {combination}")
+            best_candidate = None
+
+            for attempt in range(1, MAX_SEARCH_ATTEMPTS + 1):
+                print(
+                    f"  search attempt {attempt}: target legal test BER <= {TARGET_LEGAL_TEST_BER:.3f}, "
+                    f"min illegal single BER > {MIN_ILLEGAL_SINGLE_BER_THRESHOLD:.3f}"
+                )
+                result = test.run_position_experiment(
+                    csv_files=csv_files,
+                    search_bits=SEARCH_BITS,
+                    test_bits=TEST_BITS,
+                    min_probes=5,
+                    max_probes=20,
+                    max_candidates=1200,
+                )
+                print(
+                    f"    legal result: best BER = {result['best_ber']:.6f}, "
+                    f"test BER = {result['test_ber']:.6f}"
+                )
+
+                security_metrics = evaluate_security_for_probe_set(
+                    project_root=project_root,
+                    legal_positions=combination,
+                    probes=result["best_probes"],
+                    num_bits=SECURITY_SEARCH_BITS,
+                    rng_seed=100000 * idx + attempt * 7919,
+                )
+                candidate = attach_security_metrics(result, security_metrics)
+                print(
+                    f"    security screening ({SECURITY_SEARCH_BITS} bits): "
+                    f"min illegal single BER = {candidate['min_illegal_single_ber']:.6f}, "
+                    f"average illegal single BER = {candidate['average_illegal_single_ber']:.6f}, "
+                    f"worst illegal/legal = ({candidate['worst_illegal_position']}, {candidate['worst_legal_position']})"
+                )
+
+                if candidate["security_satisfied"] and SECURITY_CONFIRM_BITS != SECURITY_SEARCH_BITS:
+                    confirmed_metrics = evaluate_security_for_probe_set(
+                        project_root=project_root,
+                        legal_positions=combination,
+                        probes=result["best_probes"],
+                        num_bits=SECURITY_CONFIRM_BITS,
+                        rng_seed=200000 * idx + attempt * 104729,
+                    )
+                    candidate = attach_security_metrics(result, confirmed_metrics)
+                    print(
+                        f"    security confirmation ({SECURITY_CONFIRM_BITS} bits): "
+                        f"min illegal single BER = {candidate['min_illegal_single_ber']:.6f}, "
+                        f"average illegal single BER = {candidate['average_illegal_single_ber']:.6f}"
+                    )
+
+                candidate["attempt_count"] = attempt
+                if best_candidate is None or candidate_rank_key(candidate) < candidate_rank_key(best_candidate):
+                    best_candidate = candidate
+                    print("    updated best security-aware candidate for this combination.")
+
+                if (
+                    candidate["security_satisfied"]
+                    and abs(candidate["min_illegal_single_ber"] - TARGET_ILLEGAL_SINGLE_BER) <= 0.02
+                ):
+                    print("    found a secure candidate already very close to BER=0.5, stopping early.")
+                    break
+
+            if best_candidate is None:
+                raise RuntimeError(f"Failed to obtain a result for position combination {combination}")
+
+            print(f"[{idx}/{len(combinations)}] position combination: {combination}")
+            print(f"  best probe count: {best_candidate['best_probe_count']}")
+            print(f"  probe combination: {best_candidate['best_probes']}")
+            print(f"  legal best BER: {best_candidate['best_ber']:.6f}")
+            print(f"  legal test BER: {best_candidate['test_ber']:.6f}")
+            print(f"  min illegal single BER: {best_candidate['min_illegal_single_ber']:.6f}")
+            print(f"  average illegal single BER: {best_candidate['average_illegal_single_ber']:.6f}")
+            print(
+                f"  worst illegal/legal pair: "
+                f"({best_candidate['worst_illegal_position']}, {best_candidate['worst_legal_position']})"
+            )
+            print(f"  security satisfied: {'yes' if best_candidate['security_satisfied'] else 'no'}")
+
+            completed_count += 1
+            cumulative_sum += float(best_candidate["test_ber"])
+            cumulative_test_ber = cumulative_sum / completed_count
+            print(f"  cumulative test BER: {cumulative_test_ber:.6f}")
+
+            writer.writerow([
+                combination_str,
+                best_candidate["best_probe_count"],
+                format_probes(best_candidate["best_probes"]),
+                f"{best_candidate['best_ber']:.6f}",
+                f"{best_candidate['test_ber']:.6f}",
+                f"{best_candidate['min_illegal_single_ber']:.6f}",
+                f"{best_candidate['average_illegal_single_ber']:.6f}",
+                best_candidate["worst_illegal_position"],
+                best_candidate["worst_legal_position"],
+                best_candidate["security_bits"],
+                "yes" if best_candidate["security_satisfied"] else "no",
+                f"{best_candidate['illegal_distance_to_half']:.6f}",
+                best_candidate["attempt_count"],
+                f"{cumulative_test_ber:.6f}",
+            ])
+            f.flush()
+
+    return results_file
+
+
+def main() -> None:
+    results_file = run_batch_experiment()
+    print(f"Results saved to: {results_file}")
+
+
+if __name__ == "__main__":
+    main()

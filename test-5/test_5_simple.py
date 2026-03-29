@@ -24,6 +24,10 @@ import pandas as pd
 Array = np.ndarray
 EXACT_ENUMERATION_MAX_POSITIONS = 8
 CSV_MATRIX_CACHE: dict[str, Array] = {}
+USE_CONVOLUTIONAL_FEC = True
+CONV_CODE_CONSTRAINT_LENGTH = 3
+CONV_CODE_TAIL_BITS = CONV_CODE_CONSTRAINT_LENGTH - 1
+CONV_CODE_NUM_STATES = 1 << CONV_CODE_TAIL_BITS
 
 
 @dataclass
@@ -88,6 +92,10 @@ def pm1_to_bin(bits_pm: Array) -> Array:
     return np.where(np.asarray(bits_pm) > 0, 1, 0)
 
 
+def bin_to_pm1(bits_bin: Array) -> Array:
+    return np.where(np.asarray(bits_bin, dtype=int) > 0, 1, -1)
+
+
 def should_use_exact_block_evaluation(num_positions: int) -> bool:
     return num_positions <= EXACT_ENUMERATION_MAX_POSITIONS
 
@@ -96,6 +104,103 @@ def generate_all_bit_blocks(num_positions: int) -> List[Array]:
     return [
         np.asarray(bits_pm, dtype=int)
         for bits_pm in itertools.product([-1, 1], repeat=num_positions)
+    ]
+
+
+def convolutional_encode_bits(bits_bin: Sequence[int]) -> Array:
+    memory_1 = 0
+    memory_2 = 0
+    outputs: list[int] = []
+
+    for bit in list(np.asarray(bits_bin, dtype=int).tolist()) + [0] * CONV_CODE_TAIL_BITS:
+        bit = int(bit)
+        outputs.append(bit ^ memory_1 ^ memory_2)
+        outputs.append(bit ^ memory_2)
+        memory_2 = memory_1
+        memory_1 = bit
+
+    return np.asarray(outputs, dtype=int)
+
+
+def viterbi_decode_hard(coded_bits: Sequence[int]) -> Array:
+    coded = np.asarray(coded_bits, dtype=int)
+    if coded.size % 2 != 0:
+        raise ValueError("Convolutional coded bit stream length must be even")
+
+    num_steps = coded.size // 2
+    path_metrics = np.full(CONV_CODE_NUM_STATES, np.inf, dtype=float)
+    path_metrics[0] = 0.0
+    predecessors = np.full((num_steps, CONV_CODE_NUM_STATES), -1, dtype=int)
+    decided_bits = np.zeros((num_steps, CONV_CODE_NUM_STATES), dtype=int)
+
+    for step in range(num_steps):
+        rx_0 = int(coded[2 * step])
+        rx_1 = int(coded[2 * step + 1])
+        next_metrics = np.full(CONV_CODE_NUM_STATES, np.inf, dtype=float)
+
+        for state in range(CONV_CODE_NUM_STATES):
+            if not np.isfinite(path_metrics[state]):
+                continue
+
+            memory_1 = (state >> 1) & 1
+            memory_2 = state & 1
+            for input_bit in (0, 1):
+                out_0 = input_bit ^ memory_1 ^ memory_2
+                out_1 = input_bit ^ memory_2
+                next_state = (input_bit << 1) | memory_1
+                branch_metric = float((out_0 != rx_0) + (out_1 != rx_1))
+                metric = path_metrics[state] + branch_metric
+                if metric < next_metrics[next_state]:
+                    next_metrics[next_state] = metric
+                    predecessors[step, next_state] = state
+                    decided_bits[step, next_state] = input_bit
+
+        path_metrics = next_metrics
+
+    state = 0
+    if not np.isfinite(path_metrics[state]):
+        state = int(np.argmin(path_metrics))
+
+    decoded = np.zeros(num_steps, dtype=int)
+    for step in range(num_steps - 1, -1, -1):
+        decoded[step] = decided_bits[step, state]
+        prev_state = predecessors[step, state]
+        if prev_state < 0:
+            prev_state = 0
+        state = prev_state
+
+    if CONV_CODE_TAIL_BITS == 0:
+        return decoded
+    return decoded[:-CONV_CODE_TAIL_BITS]
+
+
+def generate_random_information_bits(
+    num_bits: int,
+    num_positions: int,
+    rng: random.Random | None = None,
+) -> Array:
+    if rng is None:
+        rng = random.Random()
+    return np.asarray(
+        [[rng.choice([0, 1]) for _ in range(num_positions)] for _ in range(num_bits)],
+        dtype=int,
+    )
+
+
+def build_convolutional_bit_blocks(info_bits_bin: Array) -> List[Array]:
+    info_bits = np.asarray(info_bits_bin, dtype=int)
+    if info_bits.ndim != 2:
+        raise ValueError("info_bits_bin must have shape (num_bits, num_positions)")
+
+    num_positions = info_bits.shape[1]
+    encoded_streams = [convolutional_encode_bits(info_bits[:, pos_idx]) for pos_idx in range(num_positions)]
+    encoded_length = len(encoded_streams[0])
+    if any(len(stream) != encoded_length for stream in encoded_streams):
+        raise ValueError("Encoded streams must have the same length")
+
+    return [
+        bin_to_pm1(np.asarray([stream[step_idx] for stream in encoded_streams], dtype=int))
+        for step_idx in range(encoded_length)
     ]
 
 
@@ -236,6 +341,48 @@ def evaluate_blocks_ber(
             position_total[model_idx] += 1
             if bits_tx[model_idx] != dec.bit_hat_bin:
                 position_errors[model_idx] += 1
+
+    corrected_position_bers = np.minimum(position_errors / np.maximum(position_total, 1.0), 1.0)
+    corrected_position_bers = np.minimum(corrected_position_bers, 1.0 - corrected_position_bers)
+    corrected_error_bits = float(np.sum(corrected_position_bers * position_total))
+    total_bits = float(np.sum(position_total))
+    return corrected_error_bits / total_bits if total_bits > 0 else 0.0
+
+
+def evaluate_blocks_ber_with_convolutional_fec(
+    models: List[FingerprintModel],
+    info_bits_bin: Array,
+    hue_mapping: Dict[Tuple[int, ...], int],
+) -> float:
+    info_bits = np.asarray(info_bits_bin, dtype=int)
+    if info_bits.size == 0:
+        return 0.0
+
+    codes = [m.code for m in models]
+    probe_to_row = build_probe_to_row(models[0].probes)
+    bit_blocks_pm = build_convolutional_bit_blocks(info_bits)
+    received_streams: list[list[int]] = [[] for _ in models]
+
+    for bits_pm in bit_blocks_pm:
+        bits_pm = np.asarray(bits_pm, dtype=int)
+        _, symbol_combinations = build_symbol_sequence(bits_pm, codes)
+        hue_seq = map_symbol_to_hue(symbol_combinations, hue_mapping)
+
+        for model_idx, model in enumerate(models):
+            Y_obs = observe_block_from_measured_matrix(hue_seq, model.Y, probe_to_row)
+            dec = decode_local_block(Y_obs, model.w, model.code)
+            received_streams[model_idx].append(int(dec.bit_hat_bin))
+
+    position_errors = np.zeros(len(models), dtype=float)
+    position_total = np.zeros(len(models), dtype=float)
+    for model_idx in range(len(models)):
+        decoded_bits = viterbi_decode_hard(received_streams[model_idx])
+        reference_bits = info_bits[:, model_idx]
+        compare_len = min(len(decoded_bits), len(reference_bits))
+        position_total[model_idx] = compare_len
+        if compare_len <= 0:
+            continue
+        position_errors[model_idx] = float(np.sum(decoded_bits[:compare_len] != reference_bits[:compare_len]))
 
     corrected_position_bers = np.minimum(position_errors / np.maximum(position_total, 1.0), 1.0)
     corrected_position_bers = np.minimum(corrected_position_bers, 1.0 - corrected_position_bers)
@@ -400,6 +547,10 @@ def evaluate_probe_combination(
         mapping_top_k=mapping_top_k,
         rng=rng,
     )
+    if USE_CONVOLUTIONAL_FEC:
+        info_bits_bin = generate_random_information_bits(num_bits, len(csv_files), rng=rng)
+        return evaluate_blocks_ber_with_convolutional_fec(models, info_bits_bin, hue_mapping)
+
     if should_use_exact_block_evaluation(len(csv_files)) and not force_random_bits:
         bit_blocks_pm = generate_all_bit_blocks(len(csv_files))
     else:
