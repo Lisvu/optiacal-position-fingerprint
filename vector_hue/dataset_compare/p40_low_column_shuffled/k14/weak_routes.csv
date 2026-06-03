@@ -1,0 +1,2 @@
+﻿sample_index,position_combination,anchor_candidate_id,anchor_source,anchor_min_route_min_ber,anchor_worst_route,weak_routes,weak_route_anchor_values
+1,"(1, 2, 3, 4, 10, 14, 15, 16, 17, 18, 23, 24, 27, 28)",165,baseline_global_guarded,0.18500000,8->27,"[8->27, 7->4, 13->27, 13->2, 8->28, 8->2, 8->1]","{'8->27': '0.18500000', '7->4': '0.22800000', '13->27': '0.32800000', '13->2': '0.33500000', '8->28': '0.38800000', '8->2': '0.42800000', '8->1': '0.43100000'}"

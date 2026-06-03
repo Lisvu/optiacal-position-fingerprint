@@ -33,6 +33,7 @@ import test_4_simple as test
 LIGHT_CONDITION = "white"
 SOURCE_RESULTS_FILENAME = "batch_test_results_optimized_v2.csv"
 OUTPUT_RESULTS_FILENAME = "security_illegal_position_results.csv"
+OUTPUT_CONCISE_RESULTS_FILENAME = "security_illegal_position_results_concise.csv"
 SUMMARY_RESULTS_FILENAME = "security_illegal_position_summary.csv"
 NUM_BITS = 10000
 MAPPING_EVAL_BITS = 500
@@ -98,6 +99,36 @@ def evaluate_illegal_position_against_legal_bits(
     illegal_model = test.extract_fingerprint(probes_array, illegal_matrix, force_positive_first=True)
     probe_to_row = test.build_probe_to_row(probes_array)
     legal_codes = [model.code for model in legal_models]
+    if test.USE_CONVOLUTIONAL_FEC:
+        info_bits = test.generate_random_information_bits(num_bits, len(legal_models), rng=rng)
+        bit_blocks_pm = test.build_convolutional_bit_blocks(info_bits)
+        received_stream: list[int] = []
+
+        for bits_pm in bit_blocks_pm:
+            bits_pm = np.asarray(bits_pm, dtype=int)
+            _, symbol_combinations = test.build_symbol_sequence(bits_pm, legal_codes)
+            hue_seq = test.map_symbol_to_hue(symbol_combinations, hue_mapping)
+            illegal_observation = test.observe_block_from_measured_matrix(hue_seq, illegal_matrix, probe_to_row)
+            illegal_dec = test.decode_local_block(illegal_observation, illegal_model.w, illegal_model.code)
+            received_stream.append(int(illegal_dec.bit_hat_bin))
+
+        decoded_bits = test.viterbi_decode_hard(received_stream)
+        position_errors = np.zeros(len(legal_models), dtype=float)
+        position_total = np.zeros(len(legal_models), dtype=float)
+        for idx in range(len(legal_models)):
+            reference_bits = info_bits[:, idx]
+            compare_len = min(len(decoded_bits), len(reference_bits))
+            position_total[idx] = compare_len
+            if compare_len <= 0:
+                continue
+            position_errors[idx] = float(np.sum(decoded_bits[:compare_len] != reference_bits[:compare_len]))
+
+        position_bers = (position_errors / np.maximum(position_total, 1.0)).tolist()
+        total_errors = float(np.sum(position_errors))
+        total_bits = float(np.sum(position_total))
+        total_ber = total_errors / total_bits if total_bits > 0 else 0.0
+        return [float(v) for v in position_bers], float(total_ber)
+
     bit_blocks_pm = test.generate_random_bit_blocks(num_bits, len(legal_models), rng=rng)
 
     position_errors = np.zeros(len(legal_models), dtype=float)
@@ -167,6 +198,23 @@ def write_results(results_file: str, rows: Sequence[dict]) -> None:
         writer.writerows(rows)
 
 
+def write_concise_results(results_file: str, rows: Sequence[dict]) -> None:
+    fieldnames = [
+        "legal_position_combination",
+        "illegal_position",
+        "ber_vs_legal_pos_1",
+        "ber_vs_legal_pos_2",
+        "ber_vs_legal_pos_3",
+        "ber_vs_legal_pos_4",
+        "average_ber",
+        "cumulative_average_ber",
+    ]
+    with open(results_file, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def append_summary_row(results_file: str, row: dict) -> None:
     fieldnames = [
         "legal_position_combination",
@@ -198,12 +246,16 @@ def run_security_validation() -> str:
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     source_file = os.path.join(project_root, "test-4", SOURCE_RESULTS_FILENAME)
     results_file = os.path.join(project_root, "test-4", OUTPUT_RESULTS_FILENAME)
+    concise_results_file = os.path.join(project_root, "test-4", OUTPUT_CONCISE_RESULTS_FILENAME)
     summary_file = os.path.join(project_root, "test-4", SUMMARY_RESULTS_FILENAME)
 
     legal_configs = load_legal_configs(source_file)
     available_positions = get_available_positions(project_root, LIGHT_CONDITION)
     system_rng = random.SystemRandom()
     result_rows = []
+    concise_result_rows = []
+    cumulative_average_sum = 0.0
+    cumulative_average_count = 0
     if os.path.exists(summary_file):
         os.remove(summary_file)
 
@@ -319,6 +371,20 @@ def run_security_validation() -> str:
                 "stability_run_5_total_ber": f"{stability_total_bers[4]:.6f}",
             })
 
+            average_ber = float(sum(position_bers) / len(position_bers)) if position_bers else 0.0
+            cumulative_average_count += 1
+            cumulative_average_sum += average_ber
+            concise_result_rows.append({
+                "legal_position_combination": str(legal_positions),
+                "illegal_position": illegal_position,
+                "ber_vs_legal_pos_1": f"{position_bers[0]:.6f}",
+                "ber_vs_legal_pos_2": f"{position_bers[1]:.6f}",
+                "ber_vs_legal_pos_3": f"{position_bers[2]:.6f}",
+                "ber_vs_legal_pos_4": f"{position_bers[3]:.6f}",
+                "average_ber": f"{average_ber:.6f}",
+                "cumulative_average_ber": f"{(cumulative_average_sum / cumulative_average_count):.6f}",
+            })
+
         min_illegal_position = ""
         min_illegal_total_ber = 0.0
         if illegal_total_ber_pairs:
@@ -360,9 +426,11 @@ def run_security_validation() -> str:
         )
 
     write_results(results_file, result_rows)
+    write_concise_results(concise_results_file, concise_result_rows)
     print(f"Results saved to: {results_file}")
+    print(f"Concise results saved to: {concise_results_file}")
     print(f"Summary saved to: {summary_file}")
-    return results_file
+    return concise_results_file
 
 
 def main() -> None:

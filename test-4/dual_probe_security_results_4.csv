@@ -1,0 +1,6 @@
+﻿position_combination,probe_count_a,probes_a,probe_count_b,probes_b,legal_ber_joint,min_illegal_ber_joint,security_satisfied,legal_ber_a,legal_ber_b,min_illegal_ber_a,min_illegal_ber_b
+"(1, 2, 3, 4)",0,,0,,1.0,,no,,,,
+"(1, 2, 3, 5)",0,,0,,1.0,,no,,,,
+"(1, 2, 3, 6)",0,,0,,1.0,,no,,,,
+"(1, 2, 3, 7)",0,,0,,1.0,,no,,,,
+"(1, 2, 3, 8)",0,,0,,1.0,,no,,,,

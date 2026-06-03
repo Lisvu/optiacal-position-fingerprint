@@ -1,0 +1,6 @@
+﻿position_combination,probe_count,probes,hue_mapping,legal_ber,min_illegal_ber,average_illegal_ber,worst_illegal_position,security_satisfied
+"(1, 2, 3, 4)",0,,,1.0,,,,no
+"(1, 2, 3, 5)",0,,,1.0,,,,no
+"(1, 2, 3, 6)",0,,,1.0,,,,no
+"(1, 2, 3, 7)",0,,,1.0,,,,no
+"(1, 2, 3, 8)",0,,,1.0,,,,no

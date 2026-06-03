@@ -1,0 +1,388 @@
+\documentclass[UTF8,a4paper,11pt]{ctexart}
+
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{xcolor}
+
+\geometry{left=2.6cm,right=2.6cm,top=2.5cm,bottom=2.5cm}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  urlcolor=blue!60!black,
+  citecolor=blue!60!black
+}
+
+\title{基于位置指纹的安全感知探针与 Hue Mapping 搜索实验流程}
+\author{Position Fingerprint Experiment}
+\date{\today}
+
+\newcommand{\BER}{\operatorname{BER}}
+\newcommand{\sBER}{\operatorname{sBER}}
+\newcommand{\argmax}{\operatorname*{arg\,max}}
+\newcommand{\argmin}{\operatorname*{arg\,min}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+本文档整理当前三合法位置位置指纹通信实验的完整流程，重点说明安全感知探针集合
+和符号到 hue 的映射（hue mapping）搜索方法。实验目标是在不采用时分发送的前提下，
+对每一个合法三位置组合单独搜索一套公共发送序列所需的探针集合与 hue mapping，使三
+个合法位置能够同时正确解码，同时任意非法位置不能完整恢复任意一路合法信息。实验将
+结果保存到 \texttt{test-3/security\_aware\_safe\_probes.csv}，并支持断点续跑：已经找到
+安全探针的位置组合不会重复搜索。
+\end{abstract}
+
+\section{实验目标与系统设定}
+
+设所有候选空间位置集合为
+\[
+\mathcal{P}=\{1,2,\ldots,28\}.
+\]
+一次实验选择三个合法接收位置组成合法组
+\[
+\mathcal{L}=\{\ell_1,\ell_2,\ell_3\}\subset \mathcal{P},
+\]
+其余位置视为非法位置集合
+\[
+\mathcal{I}=\mathcal{P}\setminus\mathcal{L}.
+\]
+
+对每个合法组，本实验独立搜索：
+\[
+\mathcal{Q}=\{q_1,q_2,\ldots,q_m\},
+\]
+其中 $\mathcal{Q}$ 是探针 hue 集合；以及
+\[
+M:\{-1,+1\}^3\rightarrow \mathcal{Q},
+\]
+其中 $M$ 是三路符号组合到实际发送 hue 的映射。不同合法位置组合拥有各自的
+$\mathcal{Q}$ 和 $M$。但是在同一个合法组内，三个合法位置和所有非法位置接收到的仍然是
+同一个公共 hue 序列，因此该方法仍属于位置指纹码分多址思想，而不是时分发送。
+
+搜索目标为：
+\[
+\BER_{\mathrm{legal}}\leq 0.02,
+\]
+并且对任意非法位置和任意合法信息路由，安全误码率满足
+\[
+\min_{\iota\in\mathcal{I},\,j\in\{1,2,3\}}
+\sBER(\iota,j) > 0.1.
+\]
+其中安全误码率定义为
+\[
+\sBER(\iota,j)=\min\{\BER(\iota,j),\,1-\BER(\iota,j)\}.
+\]
+该定义将 $\BER=1$ 也视为不安全，因为非法接收者只需取反即可恢复原信息。
+
+\section{位置指纹模型}
+
+对于位置 $p$，在探针集合 $\mathcal{Q}$ 上读取响应矩阵
+\[
+Y_p\in\mathbb{R}^{m\times d}.
+\]
+首先对每一列做线性去趋势：
+\[
+Y_p = T_p + R_p,
+\]
+其中 $T_p$ 是线性趋势项，$R_p$ 是残差矩阵。随后对残差矩阵做奇异值分解：
+\[
+R_p=U\Sigma V^\top.
+\]
+取第一右奇异向量作为位置指纹方向：
+\[
+w_p = V_{1}^{\top}.
+\]
+将残差投影到 $w_p$ 得到
+\[
+z_p = R_p w_p.
+\]
+位置地址码定义为
+\[
+c_p[k]=
+\begin{cases}
++1, & z_p[k]\geq 0,\\
+-1, & z_p[k]<0.
+\end{cases}
+\]
+为避免符号方向不一致，合法组内所有模型会以第一个合法位置为参考进行方向对齐。
+
+\section{编码、发送与解码}
+
+对一个三路 bit block，记 $\mathbf{b}=(b_1,b_2,b_3)$，其中
+$b_j\in\{-1,+1\}$。第 $k$ 个探针位置对应的符号组合为
+\[
+\mathbf{s}[k]=
+\left(b_1c_{\ell_1}[k],\,b_2c_{\ell_2}[k],\,b_3c_{\ell_3}[k]\right)
+\in\{-1,+1\}^3.
+\]
+发送端通过 hue mapping $M$ 将每个符号组合映射为实际发送 hue：
+\[
+h[k]=M(\mathbf{s}[k]).
+\]
+因此每个 bit block 会产生一个公共 hue 序列
+\[
+\mathbf{h}=(h[1],h[2],\ldots,h[m]).
+\]
+
+接收端位置 $p$ 使用自身实测响应矩阵按 hue 查表，得到观察矩阵
+\[
+Y_{p,\mathrm{obs}}.
+\]
+对观察矩阵按列去中心化后投影到本地指纹方向：
+\[
+u_p=(Y_{p,\mathrm{obs}}-\bar{Y}_{p,\mathrm{obs}})w_p.
+\]
+本地判决统计量为
+\[
+\gamma_p=c_p^\top u_p.
+\]
+解码 bit 为
+\[
+\hat{b}_p=
+\begin{cases}
++1, & \gamma_p>0,\\
+-1, & \gamma_p\leq 0.
+\end{cases}
+\]
+
+\section{安全性评价}
+
+\subsection{合法端准确性}
+
+对合法组 $\mathcal{L}$，实验精确枚举三路 bit 的所有 $2^3=8$ 种状态。在每一种状态下，
+三个合法位置分别解码自身对应的信息流。合法端每路误码率为
+\[
+\BER_{\mathrm{legal},j}
+=\frac{1}{8}\sum_{\mathbf{b}\in\{-1,+1\}^3}
+\mathbb{I}\left[\hat{b}_{\ell_j}(\mathbf{b})\neq b_j\right].
+\]
+考虑可能存在整体取反等价，实验中使用 corrected BER：
+\[
+\BER_{\mathrm{legal},j}^{\mathrm{corr}}
+=\min\left\{\BER_{\mathrm{legal},j},\,1-\BER_{\mathrm{legal},j}\right\}.
+\]
+合法端平均 corrected BER 定义为
+\[
+\BER_{\mathrm{legal}}
+=\frac{1}{3}\sum_{j=1}^3
+\BER_{\mathrm{legal},j}^{\mathrm{corr}}.
+\]
+
+\subsection{非法端最坏情况安全 BER}
+
+对任意非法位置 $\iota\in\mathcal{I}$，同样枚举 $2^3=8$ 种输入状态。非法位置只有一个
+本地解码输出 $\hat{b}_{\iota}$，将其分别与三路合法 bit 比较，得到
+\[
+\BER(\iota,j)
+=\frac{1}{8}\sum_{\mathbf{b}\in\{-1,+1\}^3}
+\mathbb{I}\left[\hat{b}_{\iota}(\mathbf{b})\neq b_j\right].
+\]
+安全误码率为
+\[
+\sBER(\iota,j)=\min\{\BER(\iota,j),\,1-\BER(\iota,j)\}.
+\]
+搜索中使用的核心安全指标为
+\[
+\sBER_{\min}
+=\min_{\iota\in\mathcal{I},\,j\in\{1,2,3\}}\sBER(\iota,j).
+\]
+当 $\sBER_{\min}=0$ 时，说明至少存在一个非法位置可以完整恢复某一路合法信息，或者取反后完整恢复。
+
+\subsection{真值表泄露诊断}
+
+仅看地址码相关性并不能完全发现泄露，因为非法位置可能在 hue mapping 作用后形成与某一路
+合法 bit 等价的输入输出函数。为此实验引入真值表诊断。
+
+对非法位置 $\iota$，定义其在 $2^3=8$ 个输入状态上的输出真值表：
+\[
+T_{\iota}=
+\left(
+\hat{b}_{\iota}(\mathbf{b}_1),\ldots,
+\hat{b}_{\iota}(\mathbf{b}_8)
+\right).
+\]
+第 $j$ 路合法 bit 的真值表为
+\[
+B_j=
+\left(
+b_j(\mathbf{b}_1),\ldots,b_j(\mathbf{b}_8)
+\right).
+\]
+非法输出到合法 bit 或其取反的最小 Hamming 距离为
+\[
+d_{\min}
+=
+\min_{\iota\in\mathcal{I},\,j\in\{1,2,3\}}
+\min\left\{
+d_H(T_{\iota},B_j),\,
+d_H(T_{\iota},\mathbf{1}-B_j)
+\right\}.
+\]
+当 $d_{\min}=0$ 时，非法输出真值表完全等价于某一路合法 bit 或其取反。当前三位置搜索要求
+\[
+d_{\min}\geq 1.
+\]
+由于只有 8 个状态，$d_{\min}=1$ 对应最小安全 BER 至少为 $1/8=0.125$。
+
+\section{Hue Mapping 候选生成}
+
+原始 mapping 只使用严格符号匹配候选：对符号组合
+\[
+\mathbf{a}=(a_1,a_2,a_3)\in\{-1,+1\}^3,
+\]
+若某个探针 $q_k$ 满足
+\[
+a_j z_{\ell_j}[k] > 0,\quad j=1,2,3,
+\]
+则该探针被视为严格匹配候选。严格匹配候选按幅值
+\[
+S_{\mathrm{strict}}(k)=\sum_{j=1}^{3}|z_{\ell_j}[k]|
+\]
+排序，取前若干个。
+
+优化后的方法进一步加入宽松候选。对任意探针 $q_k$，定义 signed margin：
+\[
+m_j(k)=a_j z_{\ell_j}[k].
+\]
+匹配数量为
+\[
+N_{\mathrm{match}}(k)=\sum_{j=1}^{3}\mathbb{I}[m_j(k)>0].
+\]
+宽松评分为
+\[
+S_{\mathrm{relaxed}}(k)
+=1000\,N_{\mathrm{match}}(k)
++\sum_{j=1}^{3}|m_j(k)|
+-2\sum_{j:m_j(k)\leq 0}|m_j(k)|.
+\]
+每个符号组合的候选 hue 列表由严格匹配候选和宽松高分候选合并得到，最多保留
+\texttt{RELAXED\_MAPPING\_TOP\_K}=4 个候选。
+
+三位置共有 8 个符号组合，因此理论 mapping 空间最大为
+\[
+4^8=65536.
+\]
+实验首先枚举前 \texttt{DETERMINISTIC\_HUE\_MAPPING\_PREFIX}=512 个候选，然后随机采样，
+最多评估 \texttt{MAX\_HUE\_MAPPINGS\_PER\_PROBE}=4096 个 mapping。
+
+\section{探针集合搜索}
+
+探针数量在区间
+\[
+m\in\{5,6,\ldots,30\}
+\]
+中搜索。为控制探针过密问题，最小间隔随探针数量变化：
+\[
+\Delta_{\min}(m)=
+\begin{cases}
+30, & m\leq 12,\\
+20, & 13\leq m\leq 16,\\
+15, & 17\leq m\leq 22,\\
+10, & m\geq 23.
+\end{cases}
+\]
+
+搜索分为随机候选和局部细化两阶段。
+
+\subsection{随机候选阶段}
+
+对每个探针数量 $m$，随机采样若干满足最小间隔约束的探针集合：
+\[
+\mathcal{Q}\subset\{5,10,15,\ldots\}.
+\]
+每个候选探针集合都会执行安全感知 hue mapping 搜索。候选评价包含：
+\[
+\BER_{\mathrm{legal}},\quad
+\sBER_{\min},\quad
+d_{\min},\quad
+|\rho|_{\mathrm{worst}},\quad
+|\mathcal{M}|,
+\]
+其中 $|\rho|_{\mathrm{worst}}$ 是最坏非法/合法地址码相关性的绝对值，$|\mathcal{M}|$ 是理论 mapping 候选空间。
+
+\subsection{候选排序}
+
+候选按以下优先级排序：
+\begin{enumerate}[label=(\arabic*)]
+  \item 是否满足安全约束；
+  \item 合法端 BER 是否达标；
+  \item 是否不存在 BER=0 或 BER=1 的完整泄露；
+  \item 真值表最小距离 $d_{\min}$ 越大越好；
+  \item 最小非法安全 BER $\sBER_{\min}$ 越大越好；
+  \item 最坏地址码相关性越低越好；
+  \item mapping 候选空间越大越好；
+  \item 探针数量越大越优先；
+  \item 合法端 BER 越低越好。
+\end{enumerate}
+
+\subsection{局部细化}
+
+对随机阶段保留下来的 top candidates，逐个替换其中一个探针，并重新评价：
+\[
+\mathcal{Q}'=(\mathcal{Q}\setminus\{q_i\})\cup\{q'\}.
+\]
+若新候选排序更优，则接受替换。该过程重复若干轮，直到没有改进或达到轮数上限。
+
+\section{安全探针保存与断点续跑}
+
+实验结果写入
+\[
+\texttt{test-3/security\_aware\_safe\_probes.csv}.
+\]
+每一行表示一个合法三位置组合对应的一套安全探针与 hue mapping，主要字段包括：
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+字段 & 含义\\
+\midrule
+\texttt{position\_combination} & 合法三位置组合\\
+\texttt{safe\_probes} & 搜索得到的探针集合\\
+\texttt{safe\_hue\_mapping} & 搜索得到的符号到 hue 映射\\
+\texttt{legal\_ber} & 合法端平均 corrected BER\\
+\texttt{min\_illegal\_single\_ber} & 最小非法安全 BER\\
+\texttt{worst\_illegal\_position} & 最坏非法位置\\
+\texttt{worst\_legal\_position} & 被最接近解码的合法路由\\
+\texttt{min\_truth\_table\_distance} & 真值表最小 Hamming 距离\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+脚本启动时会读取该 CSV。若某个 \texttt{position\_combination} 已经存在安全探针，则直接跳过：
+\[
+\mathcal{L}\in\mathcal{S}_{\mathrm{safe}}
+\quad\Rightarrow\quad
+\text{skip}.
+\]
+因此实验可长时间运行并断点续搜。若目标 CSV 被占用，脚本会报错提示关闭文件，避免结果写入备用文件造成混淆。
+
+\section{验证实验}
+
+搜索完成后，使用独立脚本
+\[
+\texttt{test-3/validate\_security\_aware\_safe\_probes.py}
+\]
+从安全探针 CSV 中读取每个合法组的探针和 hue mapping，用新的 10000 个随机 bit block 重新验证：
+\begin{enumerate}[label=(\arabic*)]
+  \item 每个合法位置的 raw BER；
+  \item 每个合法位置的 corrected BER；
+  \item 所有非法位置中的最小安全 BER；
+  \item 非法位置平均安全 BER；
+  \item 最坏非法位置及其 BER 向量。
+\end{enumerate}
+验证结果写入
+\[
+\texttt{test-3/security\_aware\_safe\_probe\_validation\_results.csv}.
+\]
+
+\section{方法总结}
+
+当前实验方法的关键变化是：不再只为合法端选择 BER 最小的 hue mapping，而是将非法位置最坏
+情况安全 BER 和真值表泄露同时纳入 mapping 与探针搜索。对每个合法位置组合，系统搜索一套
+专属的探针集合和 hue mapping；在同一个组合内部，所有合法和非法位置仍接收同一个公共发送
+序列，因此保留了位置指纹码分多址的实验宗旨。
+
+\end{document}
